@@ -422,6 +422,9 @@ for var in PREFIX \
            SUPPORT_CAPABILITIES \
            SUPPORT_IOPRIO \
            SUPPORT_OOM_ADJ \
+           ENABLE_BOOTSTRAP \
+           BOOTSTRAP_LIBDIR \
+           BOOTSTRAP_SERVICEDIR \
            USE_UTMPX \
            USE_INITGROUPS \
            SYSCONTROLSOCKET \
@@ -459,6 +462,10 @@ for arg in "$@"; do
         --enable-ioprio|--enable-ioprio=yes) SUPPORT_IOPRIO=1 ;;
         --disable-ioprio|--enable-ioprio=no) SUPPORT_IOPRIO=0 ;;
         --enable-oom-adj|--enable-oom-adj=yes) SUPPORT_OOM_ADJ=1 ;;
+        --enable-bootstrap|--enable-bootstrap=yes) ENABLE_BOOTSTRAP=yes ;;
+        --disable-bootstrap|--enable-bootstrap=no) ENABLE_BOOTSTRAP=no ;;
+        --with-bootstrap-libdir=*) BOOTSTRAP_LIBDIR="${arg#*=}" ;;
+        --with-bootstrap-servicedir=*) BOOTSTRAP_SERVICEDIR="${arg#*=}" ;;
         --disable-oom-adj|--enable-oom-adj=no) SUPPORT_OOM_ADJ=0 ;;
         --enable-utmpx|--enable-utmpx=yes) USE_UTMPX=1 ;;
         --disable-utmpx|--enable-utmpx=no) USE_UTMPX=0 ;;
@@ -527,6 +534,9 @@ if [ "$PLATFORM" = "Linux" ]; then
     : "${SUPPORT_CAPABILITIES:="AUTO"}"
     : "${SUPPORT_IOPRIO:="AUTO"}"
     : "${SUPPORT_OOM_ADJ:="1"}"
+    : "${ENABLE_BOOTSTRAP:="yes"}"
+    : "${BOOTSTRAP_LIBDIR:="${EPREFIX%%/}/lib/dinit"}"
+    : "${BOOTSTRAP_SERVICEDIR:="${EPREFIX%%/}/lib/dinit.d"}"
     : "${SYSCONTROLSOCKET:="/run/dinitctl"}"
 else
     : "${BUILD_SHUTDOWN:="no"}"
@@ -534,6 +544,9 @@ else
     : "${SUPPORT_CAPABILITIES:="0"}"
     : "${SUPPORT_IOPRIO:="0"}"
     : "${SUPPORT_OOM_ADJ:="0"}"
+    : "${ENABLE_BOOTSTRAP:="no"}"
+    : "${BOOTSTRAP_LIBDIR:="${EPREFIX%%/}/lib/dinit"}"
+    : "${BOOTSTRAP_SERVICEDIR:="${EPREFIX%%/}/lib/dinit.d"}"
     : "${SYSCONTROLSOCKET:="/var/run/dinitctl"}"
 fi
 
@@ -853,6 +866,9 @@ USE_INITGROUPS=$USE_INITGROUPS
 SUPPORT_CAPABILITIES=$SUPPORT_CAPABILITIES
 SUPPORT_IOPRIO=$SUPPORT_IOPRIO
 SUPPORT_OOM_ADJ=$SUPPORT_OOM_ADJ
+ENABLE_BOOTSTRAP=$ENABLE_BOOTSTRAP
+BOOTSTRAP_LIBDIR=$(quote_for_make "$(quote_for_shell "$BOOTSTRAP_LIBDIR")")
+BOOTSTRAP_SERVICEDIR=$(quote_for_make "$(quote_for_shell "$BOOTSTRAP_SERVICEDIR")")
 
 # Optional settings
 SHUTDOWN_PREFIX=$(quote_for_make "$(quote_for_shell "${SHUTDOWN_PREFIX:-}")")
