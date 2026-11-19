@@ -16,6 +16,8 @@ objects = $(dinit_objects) dinitctl.o dinit-check.o shutdown.o dinit-monitor.o d
 
 all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)
 
+.PHONY: all check check-igr run-cppcheck install clean
+
 ifeq ($(ENABLE_BOOTSTRAP),yes)
 all: bootstrap
 CXX_FOR_BUILD ?= $(CXX)
@@ -23,6 +25,7 @@ CXXFLAGS_FOR_BUILD ?= $(CXXFLAGS)
 CPPFLAGS_FOR_BUILD ?= $(CPPFLAGS)
 LDFLAGS_FOR_BUILD ?= $(LDFLAGS)
 
+.PHONY: bootstrap bootstrap-generated
 bootstrap: dinit-bootstrap bootstrap-generated
 
 dinit-bootstrap: bootstrap/runtime.cc
