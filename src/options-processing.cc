@@ -85,6 +85,9 @@ void service_dir_opt::build_paths(bool am_system_init)
             service_dir_paths.emplace_back("/etc/dinit.d", false);
             service_dir_paths.emplace_back("/run/dinit.d", false);
             service_dir_paths.emplace_back("/usr/local/lib/dinit.d", false);
+#ifdef __linux__
+            service_dir_paths.emplace_back("/usr/lib/dinit.d", false);
+#endif
             service_dir_paths.emplace_back("/lib/dinit.d", false);
         }
     }
