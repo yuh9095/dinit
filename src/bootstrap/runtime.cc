@@ -478,6 +478,7 @@ int execute_program(const std::vector<std::string> &arguments, bool optional)
         std::cerr << "dinit-bootstrap: fcntl: " << std::strerror(saved_errno) << '\n';
         return 1;
     }
+    const pid_t expected_parent = getpid();
     const pid_t child = fork();
     if (child < 0) {
         const int saved_errno = errno;
@@ -494,7 +495,6 @@ int execute_program(const std::vector<std::string> &arguments, bool optional)
         (void) sigaction(SIGTERM, &old_term, nullptr);
         (void) sigaction(SIGINT, &old_int, nullptr);
         (void) sigaction(SIGHUP, &old_hup, nullptr);
-        const pid_t expected_parent = getppid();
         (void) prctl(PR_SET_PDEATHSIG, SIGTERM);
         if (getppid() != expected_parent) _exit(128 + SIGTERM);
         (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
