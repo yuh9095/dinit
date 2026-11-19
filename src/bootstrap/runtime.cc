@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -236,6 +237,65 @@ bool write_state(const environment_info &info)
            << "devfs=" << (info.devfs.empty() ? (info.mountinfo_available ? "no" : "unknown") : info.devfs) << '\n'
            << "cgroups=" << info.cgroups << '\n';
     return output.good();
+}
+
+environment_kind load_environment_kind()
+{
+    std::ifstream input("/run/dinit/environment");
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line == "kind=bare-metal") return environment_kind::bare_metal;
+        if (line == "kind=virtual-machine") return environment_kind::virtual_machine;
+        if (line == "kind=container") return environment_kind::container;
+    }
+    return environment_kind::unknown;
+}
+
+int mount_failure(environment_kind kind, const char *filesystem,
+        const char *reason)
+{
+    if (kind == environment_kind::container) {
+        std::cerr << "dinit-bootstrap: skipping " << filesystem
+                  << " setup in container: " << reason << '\\n';
+        return 0;
+    }
+    std::cerr << "dinit-bootstrap: required " << filesystem
+              << " setup failed: " << reason << '\\n';
+    return 1;
+}
+
+int ensure_pseudo_filesystem(const char *name)
+{
+    const environment_kind kind = load_environment_kind();
+    const mount_info current = detect_mounts();
+    const std::string mounted = std::strcmp(name, "proc") == 0
+            ? current.procfs : current.sysfs;
+    const char *mountpoint = std::strcmp(name, "proc") == 0 ? "/proc" : "/sys";
+
+    if (!current.available) {
+        if (kind != environment_kind::container) {
+            return mount_failure(kind, name, "cannot inspect /proc/self/mountinfo");
+        }
+    }
+    else if (!mounted.empty()) {
+        if (mounted == name) {
+            std::cout << "dinit-bootstrap: " << mountpoint
+                      << " already mounted as " << name << '\\n';
+            return 0;
+        }
+        return mount_failure(kind, name,
+                "mountpoint is already occupied by a different filesystem");
+    }
+
+    const unsigned long flags = MS_NOSUID | MS_NODEV | MS_NOEXEC;
+    if (mount(name, mountpoint, name, flags, nullptr) == 0) {
+        std::cout << "dinit-bootstrap: mounted " << name
+                  << " on " << mountpoint << '\\n';
+        return 0;
+    }
+
+    const std::string reason = std::strerror(errno);
+    return mount_failure(kind, name, reason.c_str());
 }
 
 int run_detect(bool stay)
