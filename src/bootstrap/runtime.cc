@@ -450,12 +450,28 @@ int execute_program(const std::vector<std::string> &arguments, bool optional)
     std::memset(&action, 0, sizeof(action));
     action.sa_handler = forward_signal_to_child;
     sigemptyset(&action.sa_mask);
-    if (sigaction(SIGTERM, &action, &old_term) != 0 ||
-            sigaction(SIGINT, &action, &old_int) != 0 ||
-            sigaction(SIGHUP, &action, &old_hup) != 0) {
+    if (sigaction(SIGTERM, &action, &old_term) != 0) {
+        const int saved_errno = errno;
         (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
-        std::cerr << "dinit-bootstrap: cannot install child signal forwarding: "
-                  << std::strerror(errno) << '\n';
+        std::cerr << "dinit-bootstrap: cannot install SIGTERM forwarding: "
+                  << std::strerror(saved_errno) << '\n';
+        return 1;
+    }
+    if (sigaction(SIGINT, &action, &old_int) != 0) {
+        const int saved_errno = errno;
+        (void) sigaction(SIGTERM, &old_term, nullptr);
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+        std::cerr << "dinit-bootstrap: cannot install SIGINT forwarding: "
+                  << std::strerror(saved_errno) << '\n';
+        return 1;
+    }
+    if (sigaction(SIGHUP, &action, &old_hup) != 0) {
+        const int saved_errno = errno;
+        (void) sigaction(SIGTERM, &old_term, nullptr);
+        (void) sigaction(SIGINT, &old_int, nullptr);
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+        std::cerr << "dinit-bootstrap: cannot install SIGHUP forwarding: "
+                  << std::strerror(saved_errno) << '\n';
         return 1;
     }
 
