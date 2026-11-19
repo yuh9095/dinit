@@ -148,6 +148,50 @@ jobs:
           name: igr-tests_output
           path: src/igr-tests/*/output/*
 
+  Linux_Bootstrap_build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:bookworm
+            family: debian
+          - image: alpine:latest
+            family: alpine
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Getting dependencies (Debian)
+      if: ${{ matrix.family == 'debian' }}
+      run: |
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y g++ make m4 libcap-dev
+    - name: Getting dependencies (Alpine)
+      if: ${{ matrix.family == 'alpine' }}
+      run: |
+        apk update
+        apk add make g++ m4 libcap-dev
+    - name: Configure Linux Bootstrap
+      run: ./configure --enable-bootstrap
+    - name: Build Dinit and Linux Bootstrap
+      run: make -j2
+    - name: Check generated Dinit service graph
+      run: |
+        mkdir -p /etc/dinit.d/boot.d /etc/dinit.d/early-fs-pre.d
+        mkdir -p /etc/dinit.d/early-devices.d /etc/dinit.d/network.d
+        ./src/dinit-check --system \
+          --services-dir "$PWD/src/bootstrap-generated/early" \
+          --services-dir "$PWD/src/bootstrap-generated/generic" \
+          multi-user.target
+    - name: Test installation layout
+      run: |
+        make install DESTDIR=/tmp/dinit-bootstrap-install
+        test -x /tmp/dinit-bootstrap-install/usr/lib/dinit/dinit-bootstrap
+        test -f /tmp/dinit-bootstrap-install/usr/lib/dinit.d/bootstrap-proc
+        test -f /tmp/dinit-bootstrap-install/etc/dinit.d/multi-user.target
+
   BSD_build:
     runs-on: ubuntu-latest
     defaults:
