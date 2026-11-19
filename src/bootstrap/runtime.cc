@@ -26,6 +26,12 @@ struct environment_info {
     environment_kind kind;
     std::string container_name;
     std::string virtualization;
+    bool mountinfo_available;
+    std::string root_fs_type;
+    std::string procfs;
+    std::string sysfs;
+    std::string devfs;
+    std::string cgroups;
 };
 
 bool path_exists(const char *path)
@@ -89,6 +95,61 @@ std::string detect_virtual_machine()
     return hypervisor;
 }
 
+struct mount_info {
+    bool available;
+    std::string root_fs_type;
+    std::string procfs;
+    std::string sysfs;
+    std::string devfs;
+    bool cgroup_v1;
+    bool cgroup_v2;
+
+    mount_info() : available(false), cgroup_v1(false), cgroup_v2(false) {}
+};
+
+mount_info detect_mounts()
+{
+    mount_info info;
+    std::ifstream input("/proc/self/mountinfo");
+    if (!input) return info;
+    info.available = true;
+
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream fields(line);
+        std::string id, parent, device, root, mountpoint, options, field;
+        if (!(fields >> id >> parent >> device >> root >> mountpoint >> options))
+            continue;
+
+        while (fields >> field && field != "-") {}
+        std::string filesystem;
+        std::string source;
+        std::string super_options;
+        if (field != "-" || !(fields >> filesystem >> source >> super_options))
+            continue;
+
+        if (mountpoint == "/") info.root_fs_type = filesystem;
+        else if (mountpoint == "/proc") info.procfs = filesystem;
+        else if (mountpoint == "/sys") info.sysfs = filesystem;
+        else if (mountpoint == "/dev") info.devfs = filesystem;
+
+        if (mountpoint == "/sys/fs/cgroup"
+                || mountpoint.compare(0, 16, "/sys/fs/cgroup/") == 0) {
+            if (filesystem == "cgroup") info.cgroup_v1 = true;
+            else if (filesystem == "cgroup2") info.cgroup_v2 = true;
+        }
+    }
+
+    return info;
+}
+
+const char *mount_status(const mount_info &info, const std::string &filesystem,
+        const char *expected)
+{
+    if (!info.available) return "unknown";
+    return filesystem == expected ? "yes" : "no";
+}
+
 environment_info detect_environment()
 {
     environment_info info;
@@ -110,6 +171,18 @@ environment_info detect_environment()
 
     info.container_name = detect_container();
     info.virtualization = detect_virtual_machine();
+
+    const mount_info mounts = detect_mounts();
+    info.mountinfo_available = mounts.available;
+    info.root_fs_type = mounts.root_fs_type;
+    info.procfs = mounts.procfs;
+    info.sysfs = mounts.sysfs;
+    info.devfs = mounts.devfs;
+    if (!mounts.available) info.cgroups = "unknown";
+    else if (mounts.cgroup_v1 && mounts.cgroup_v2) info.cgroups = "hybrid";
+    else if (mounts.cgroup_v2) info.cgroups = "v2";
+    else if (mounts.cgroup_v1) info.cgroups = "v1";
+    else info.cgroups = "none";
     if (!info.container_name.empty()
             || (info.pid_namespace_depth_known && info.nested_pid_namespace)) {
         // A nested PID namespace gets container-safe policy even when its
