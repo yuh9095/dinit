@@ -617,6 +617,14 @@ case "$PLATFORM" in
     ;;
 esac
 
+case "$ENABLE_BOOTSTRAP" in
+    yes|no) ;;
+    *) error "ENABLE_BOOTSTRAP must be yes or no." ;;
+esac
+if [ "$ENABLE_BOOTSTRAP" = yes ] && [ "$PLATFORM" != Linux ]; then
+    error "The Linux Bootstrap is available only when PLATFORM=Linux."
+fi
+
 ## Create testfile.cc to test c++ compiler
 configtmpdir=`mktmpdir`
 echo "int main(int argc, char **argv) { return 0; }" > "$configtmpdir"/testfile.cc || error "Can't create temporary file"
