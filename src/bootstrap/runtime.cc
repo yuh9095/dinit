@@ -151,7 +151,7 @@ int run_detect(bool stay)
     std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
               << "dinit-bootstrap: PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
               << "dinit-bootstrap: nested PID namespace: "
-              << (info.pid_namespace ? "yes" : "no") << '\n';
+              << (info.nested_pid_namespace ? "yes" : "no") << '\n';
     if (!info.container_name.empty())
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
     if (!info.virtualization.empty())
