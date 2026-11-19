@@ -16,6 +16,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(__i386__) || defined(__x86_64__)
+#include <cpuid.h>
+#endif
+
 namespace {
 
 enum class environment_kind { bare_metal, virtual_machine, container, unknown };
@@ -75,7 +79,8 @@ bool contains_cgroup_marker(const std::string &cgroup, const char *marker)
     while ((pos = cgroup.find(token, pos)) != std::string::npos) {
         const bool left = pos == 0 || cgroup[pos - 1] == '/' || cgroup[pos - 1] == ':';
         const std::string::size_type after = pos + token.size();
-        const bool right = after == cgroup.size() || cgroup[after] == '/' || cgroup[after] == ':';
+        const bool right = after == cgroup.size() || cgroup[after] == '/' ||
+                cgroup[after] == ':' || cgroup[after] == '-' || cgroup[after] == '.';
         if (left && right) return true;
         pos = after;
     }
@@ -110,6 +115,37 @@ std::string detect_container()
 
 std::string detect_virtual_machine()
 {
+#if defined(__i386__) || defined(__x86_64__)
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & 0x80000000U)) {
+        __cpuid(0x40000000U, eax, ebx, ecx, edx);
+        std::string signature;
+        const unsigned int words[] = { ebx, ecx, edx };
+        for (unsigned int word : words) {
+            for (unsigned int shift = 0; shift < 32; shift += 8)
+                signature.push_back(static_cast<char>((word >> shift) & 0xffU));
+        }
+        if (contains(signature, "KVMKVMKVM")) return "kvm";
+        if (contains(signature, "XenVMMXenVMM")) return "xen";
+        if (contains(signature, "VMwareVMware")) return "vmware";
+        if (contains(signature, "Microsoft Hv")) return "microsoft";
+        if (contains(signature, "TCGTCGTCGTCG")) return "qemu";
+        return "hypervisor";
+    }
+#endif
+
+#if defined(__arm__) || defined(__aarch64__) || defined(__powerpc__) || defined(__powerpc64__) || defined(__riscv)
+    const std::string device_tree_hypervisor =
+            read_file("/proc/device-tree/hypervisor/compatible");
+    if (contains(device_tree_hypervisor, "linux,kvm")) return "kvm";
+    if (contains(device_tree_hypervisor, "xen")) return "xen";
+    if (contains(device_tree_hypervisor, "vmware")) return "vmware";
+    if (!device_tree_hypervisor.empty()) return "hypervisor";
+    const std::string device_tree_compatible = read_file("/proc/device-tree/compatible");
+    if (contains(device_tree_compatible, "qemu")) return "qemu";
+#endif
+
+    // DMI and sysfs are useful fallbacks, but may not be mounted yet.
     const std::string product = read_file("/sys/class/dmi/id/product_name");
     const std::string vendor = read_file("/sys/class/dmi/id/sys_vendor");
     const std::string info = product + vendor;

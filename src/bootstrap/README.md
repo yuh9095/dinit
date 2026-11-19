@@ -20,7 +20,8 @@ to be implemented by this initial package.
 * A nested PID namespace alone is not sufficient to select container policy.
   Ptrace state is not treated as evidence of proot or a container.
 * Positive virtualization evidence takes precedence over container markers,
-  so virtual machines retain the strict host policy.
+  so virtual machines retain the strict host policy. Detection checks x86
+  hypervisor CPUID, supported device-tree markers, and DMI/sysfs fallbacks.
 * Runtime helpers are launched by Dinit as direct children of PID 1 in the
   current PID namespace. The helper checks its parent PID; the helper itself
   is not expected to have PID 1.
