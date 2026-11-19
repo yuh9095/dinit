@@ -307,7 +307,7 @@ int run_detect(bool stay)
         sigaddset(&signals, SIGINT);
         sigaddset(&signals, SIGHUP);
         if (sigprocmask(SIG_BLOCK, &signals, nullptr) != 0) {
-            std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\\n';
+            std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\n';
             return 1;
         }
     }
@@ -336,7 +336,6 @@ int run_detect(bool stay)
     }
     if (!write_state(info)) return 1;
     if (!stay) return 0;
-
 
 
     // Dinit's ready-notification pipe prevents dependent services from racing
