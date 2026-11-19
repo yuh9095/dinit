@@ -409,18 +409,29 @@ int ensure_pseudo_filesystem(const char *name)
     return 1;
 }
 
-bool executable_in_path(const std::string &name)
+std::string find_executable(const std::string &name)
 {
-    if (name.find('/') != std::string::npos) return access(name.c_str(), X_OK) == 0;
-    const char *path = std::getenv("PATH");
-    if (path == nullptr || *path == '\0') path = "/usr/sbin:/usr/bin:/sbin:/bin";
+    if (name.find('/') != std::string::npos)
+        return access(name.c_str(), X_OK) == 0 ? name : std::string();
+
+    std::string path = "/usr/sbin:/usr/bin:/sbin:/bin";
+    const char *environment_path = std::getenv("PATH");
+    if (environment_path != nullptr && *environment_path != '\0')
+        path += ":" + std::string(environment_path);
+
     std::istringstream paths(path);
     std::string directory;
     while (std::getline(paths, directory, ':')) {
         if (directory.empty()) directory = ".";
-        if (access((directory + "/" + name).c_str(), X_OK) == 0) return true;
+        const std::string candidate = directory + "/" + name;
+        if (access(candidate.c_str(), X_OK) == 0) return candidate;
     }
-    return false;
+    return std::string();
+}
+
+bool executable_in_path(const std::string &name)
+{
+    return !find_executable(name).empty();
 }
 
 volatile sig_atomic_t active_child_pid = -1;
@@ -434,6 +445,17 @@ void forward_signal_to_child(int signal_number)
 int execute_program(const std::vector<std::string> &arguments, bool optional)
 {
     if (arguments.empty()) return 2;
+    const std::string executable = find_executable(arguments[0]);
+    if (executable.empty()) {
+        if (optional) {
+            std::cout << "dinit-bootstrap: optional tool " << arguments[0]
+                      << " is not installed; skipping\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: required tool " << arguments[0]
+                  << " is not installed\n";
+        return 1;
+    }
 
     sigset_t forwarded_signals, old_mask;
     sigemptyset(&forwarded_signals);
@@ -518,7 +540,7 @@ int execute_program(const std::vector<std::string> &arguments, bool optional)
         for (std::size_t i = 0; i < arguments.size(); ++i)
             argv.push_back(const_cast<char *>(arguments[i].c_str()));
         argv.push_back(nullptr);
-        execvp(argv[0], &argv[0]);
+        execv(executable.c_str(), &argv[0]);
         const int exec_error = errno;
         (void) write(error_pipe[1], &exec_error, sizeof(exec_error));
         _exit(127);
