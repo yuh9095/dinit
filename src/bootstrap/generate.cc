@@ -52,7 +52,7 @@ int main(int argc, char **argv)
         "type = internal\n"
         "depends-on: environment\n";
 
-    if (!write_file(output_dir + "/environment", environment)) return 1;
+    if (!write_file(output_dir + "/bootstrap-environment", environment)) return 1;
     if (!write_file(output_dir + "/early-prepare.target", early_prepare)) return 1;
     return 0;
 }
