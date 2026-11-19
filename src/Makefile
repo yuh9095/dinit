@@ -14,7 +14,28 @@ dinit_objects = dinit.o load-service.o service.o proc-service.o baseproc-service
 
 objects = $(dinit_objects) dinitctl.o dinit-check.o shutdown.o dinit-monitor.o dinit-client.o
 
-all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)\n\nifeq ($(ENABLE_BOOTSTRAP),yes)\nall: bootstrap\nendif\n
+all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)
+
+ifeq ($(ENABLE_BOOTSTRAP),yes)
+all: bootstrap
+CXX_FOR_BUILD ?= $(CXX)
+CXXFLAGS_FOR_BUILD ?= $(CXXFLAGS)
+CPPFLAGS_FOR_BUILD ?= $(CPPFLAGS)
+LDFLAGS_FOR_BUILD ?= $(LDFLAGS)
+
+bootstrap: dinit-bootstrap bootstrap-generated
+
+dinit-bootstrap: bootstrap/runtime.cc
+	$(CXX) $(ALL_CXXFLAGS) -std=c++11 -o $@ $< $(ALL_LDFLAGS)
+
+dinit-bootstrap-gen: bootstrap/generate.cc
+	$(CXX_FOR_BUILD) $(CPPFLAGS_FOR_BUILD) $(CXXFLAGS_FOR_BUILD) -std=c++11 -o $@ $< $(LDFLAGS_FOR_BUILD)
+
+bootstrap-generated: dinit-bootstrap-gen
+	rm -rf bootstrap-generated
+	./dinit-bootstrap-gen bootstrap-generated $(BOOTSTRAP_LIBDIR)/dinit-bootstrap
+endif
+
 ../mconfig:
 	@echo "*** No mconfig, please run make from top level"
 	@false
@@ -34,7 +55,8 @@ dinit-monitor: dinit-monitor.o
 $(SHUTDOWN_PREFIX)shutdown: shutdown.o
 	$(CXX) -o $(SHUTDOWN_PREFIX)shutdown shutdown.o $(ALL_LDFLAGS)
 
-$(objects): ../build/includes/mconfig.h\n\nifeq ($(ENABLE_BOOTSTRAP),yes)\nCXX_FOR_BUILD ?= $(CXX)\nCXXFLAGS_FOR_BUILD ?= $(CXXFLAGS)\nCPPFLAGS_FOR_BUILD ?= $(CPPFLAGS)\nLDFLAGS_FOR_BUILD ?= $(LDFLAGS)\n\nbootstrap: dinit-bootstrap bootstrap-generated\n\ndinit-bootstrap: bootstrap/runtime.cc\n\t$(CXX) $(ALL_CXXFLAGS) -std=c++11 -o $@ $< $(ALL_LDFLAGS)\n\ndinit-bootstrap-gen: bootstrap/generate.cc\n\t$(CXX_FOR_BUILD) $(CPPFLAGS_FOR_BUILD) $(CXXFLAGS_FOR_BUILD) -std=c++11 -o $@ $< $(LDFLAGS_FOR_BUILD)\n\nbootstrap-generated: dinit-bootstrap-gen\n\trm -rf bootstrap-generated\n\t./dinit-bootstrap-gen bootstrap-generated $(BOOTSTRAP_LIBDIR)/dinit-bootstrap\nendif\n
+$(objects): ../build/includes/mconfig.h
+
 $(objects): %.o: %.cc
 	$(CXX) $(ALL_CXXFLAGS) $(CPPFLAGS_LIBCAP) -MMD -MP -Iincludes -I../dasynq/include -I../build/includes -c $< -o $@
 
@@ -58,10 +80,16 @@ ifeq ($(BUILD_SHUTDOWN),yes)
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)soft-reboot
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)poweroff
 endif
+ifeq ($(ENABLE_BOOTSTRAP),yes)
+	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)
+	install $(STRIPOPTS) dinit-bootstrap $(DESTDIR)$(BOOTSTRAP_LIBDIR)/dinit-bootstrap
+	install -m 0644 bootstrap-generated/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
+endif
 
 clean:
 	rm -f *.o *.d
-	rm -f dinit dinitctl dinit-check $(SHUTDOWN_PREFIX)shutdown dinit-monitor
+	rm -f dinit dinitctl dinit-check $(SHUTDOWN_PREFIX)shutdown dinit-monitor dinit-bootstrap dinit-bootstrap-gen
+	rm -rf bootstrap-generated
 	$(MAKE) -C tests clean
 	$(MAKE) -C igr-tests clean
 
