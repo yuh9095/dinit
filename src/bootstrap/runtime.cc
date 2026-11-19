@@ -14,6 +14,7 @@
 #include <string>
 
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -422,25 +423,81 @@ bool executable_in_path(const std::string &name)
     return false;
 }
 
+volatile sig_atomic_t active_child_pid = -1;
+
+void forward_signal_to_child(int signal_number)
+{
+    const pid_t child = static_cast<pid_t>(active_child_pid);
+    if (child > 0) (void) kill(child, signal_number);
+}
+
 int execute_program(const std::vector<std::string> &arguments, bool optional)
 {
     if (arguments.empty()) return 2;
+
+    sigset_t forwarded_signals, old_mask;
+    sigemptyset(&forwarded_signals);
+    sigaddset(&forwarded_signals, SIGTERM);
+    sigaddset(&forwarded_signals, SIGINT);
+    sigaddset(&forwarded_signals, SIGHUP);
+    if (sigprocmask(SIG_BLOCK, &forwarded_signals, &old_mask) != 0) {
+        std::cerr << "dinit-bootstrap: cannot block signals before spawning tool: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+
+    struct sigaction action, old_term, old_int, old_hup;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = forward_signal_to_child;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, &old_term) != 0 ||
+            sigaction(SIGINT, &action, &old_int) != 0 ||
+            sigaction(SIGHUP, &action, &old_hup) != 0) {
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+        std::cerr << "dinit-bootstrap: cannot install child signal forwarding: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+
     int error_pipe[2];
     if (pipe(error_pipe) != 0) {
+        (void) sigaction(SIGTERM, &old_term, nullptr);
+        (void) sigaction(SIGINT, &old_int, nullptr);
+        (void) sigaction(SIGHUP, &old_hup, nullptr);
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
         std::cerr << "dinit-bootstrap: pipe: " << std::strerror(errno) << '\n';
         return 1;
     }
     if (fcntl(error_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
-        std::cerr << "dinit-bootstrap: fcntl: " << std::strerror(errno) << '\n';
-        close(error_pipe[0]); close(error_pipe[1]); return 1;
+        const int saved_errno = errno;
+        close(error_pipe[0]); close(error_pipe[1]);
+        (void) sigaction(SIGTERM, &old_term, nullptr);
+        (void) sigaction(SIGINT, &old_int, nullptr);
+        (void) sigaction(SIGHUP, &old_hup, nullptr);
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+        std::cerr << "dinit-bootstrap: fcntl: " << std::strerror(saved_errno) << '\n';
+        return 1;
     }
     const pid_t child = fork();
     if (child < 0) {
-        std::cerr << "dinit-bootstrap: fork: " << std::strerror(errno) << '\n';
-        close(error_pipe[0]); close(error_pipe[1]); return 1;
+        const int saved_errno = errno;
+        close(error_pipe[0]); close(error_pipe[1]);
+        (void) sigaction(SIGTERM, &old_term, nullptr);
+        (void) sigaction(SIGINT, &old_int, nullptr);
+        (void) sigaction(SIGHUP, &old_hup, nullptr);
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+        std::cerr << "dinit-bootstrap: fork: " << std::strerror(saved_errno) << '\n';
+        return 1;
     }
     if (child == 0) {
         close(error_pipe[0]);
+        (void) sigaction(SIGTERM, &old_term, nullptr);
+        (void) sigaction(SIGINT, &old_int, nullptr);
+        (void) sigaction(SIGHUP, &old_hup, nullptr);
+        const pid_t expected_parent = getppid();
+        (void) prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() != expected_parent) _exit(128 + SIGTERM);
+        (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
         std::vector<char *> argv;
         for (std::size_t i = 0; i < arguments.size(); ++i)
             argv.push_back(const_cast<char *>(arguments[i].c_str()));
@@ -450,6 +507,8 @@ int execute_program(const std::vector<std::string> &arguments, bool optional)
         (void) write(error_pipe[1], &exec_error, sizeof(exec_error));
         _exit(127);
     }
+    active_child_pid = child;
+    (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
     close(error_pipe[1]);
     int exec_error = 0;
     ssize_t received;
@@ -460,8 +519,20 @@ int execute_program(const std::vector<std::string> &arguments, bool optional)
     pid_t waited;
     do { waited = waitpid(child, &status, 0); }
     while (waited < 0 && errno == EINTR);
+    sigset_t current_mask;
+    (void) sigprocmask(SIG_BLOCK, &forwarded_signals, &current_mask);
+    active_child_pid = -1;
+    (void) sigaction(SIGTERM, &old_term, nullptr);
+    (void) sigaction(SIGINT, &old_int, nullptr);
+    (void) sigaction(SIGHUP, &old_hup, nullptr);
+    (void) sigprocmask(SIG_SETMASK, &old_mask, nullptr);
     if (waited < 0) {
         std::cerr << "dinit-bootstrap: waitpid: " << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (received < 0) {
+        std::cerr << "dinit-bootstrap: cannot read exec status pipe: "
+                  << std::strerror(errno) << '\n';
         return 1;
     }
     if (received > 0) {
