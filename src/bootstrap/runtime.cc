@@ -252,9 +252,9 @@ environment_kind load_environment_kind()
 }
 
 int mount_failure(environment_kind kind, const char *filesystem,
-        const char *reason)
+        const char *reason, bool container_may_skip)
 {
-    if (kind == environment_kind::container) {
+    if (kind == environment_kind::container && container_may_skip) {
         std::cerr << "dinit-bootstrap: skipping " << filesystem
                   << " setup in container: " << reason << '\n';
         return 0;
@@ -266,6 +266,9 @@ int mount_failure(environment_kind kind, const char *filesystem,
 
 int ensure_pseudo_filesystem(const char *name)
 {
+    // procfs is required for normal process/system operation. sysfs may be
+    // unavailable in restricted containers and is therefore skippable there.
+    const bool container_may_skip = std::strcmp(name, "sys") == 0;
     const environment_kind kind = load_environment_kind();
     const mount_info current = detect_mounts();
     const std::string mounted = std::strcmp(name, "proc") == 0
@@ -274,7 +277,7 @@ int ensure_pseudo_filesystem(const char *name)
 
     if (!current.available) {
         if (kind != environment_kind::container) {
-            return mount_failure(kind, name, "cannot inspect /proc/self/mountinfo");
+            return mount_failure(kind, name, "cannot inspect /proc/self/mountinfo", container_may_skip);
         }
     }
     else if (!mounted.empty()) {
@@ -295,7 +298,7 @@ int ensure_pseudo_filesystem(const char *name)
     }
 
     const std::string reason = std::strerror(errno);
-    return mount_failure(kind, name, reason.c_str());
+    return mount_failure(kind, name, reason.c_str(), container_may_skip);
 }
 
 int run_detect(bool stay)
