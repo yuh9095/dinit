@@ -2,7 +2,7 @@
 // This program is part of the generated dinit.d service package.
 
 #include <cerrno>
-#include <csignal>
+#include <signal.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -300,6 +300,18 @@ int ensure_pseudo_filesystem(const char *name)
 
 int run_detect(bool stay)
 {
+    sigset_t signals;
+    if (stay) {
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGTERM);
+        sigaddset(&signals, SIGINT);
+        sigaddset(&signals, SIGHUP);
+        if (sigprocmask(SIG_BLOCK, &signals, nullptr) != 0) {
+            std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\\n';
+            return 1;
+        }
+    }
+
     const environment_info info = detect_environment();
     std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
               << "dinit-bootstrap: PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
@@ -325,15 +337,7 @@ int run_detect(bool stay)
     if (!write_state(info)) return 1;
     if (!stay) return 0;
 
-    sigset_t signals;
-    sigemptyset(&signals);
-    sigaddset(&signals, SIGTERM);
-    sigaddset(&signals, SIGINT);
-    sigaddset(&signals, SIGHUP);
-    if (sigprocmask(SIG_BLOCK, &signals, nullptr) != 0) {
-        std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\n';
-        return 1;
-    }
+
 
     // Dinit's ready-notification pipe prevents dependent services from racing
     // the environment-state write above.
