@@ -88,13 +88,13 @@ ifeq ($(ENABLE_BOOTSTRAP),yes)
 	install $(STRIPOPTS) dinit-bootstrap $(DESTDIR)$(BOOTSTRAP_LIBDIR)/dinit-bootstrap
 	install -m 0644 bootstrap-generated/early/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
 	@set -e; generic_dir="$(DESTDIR)"$(BOOTSTRAP_GENERIC_SERVICEDIR); for file in bootstrap-generated/generic/* bootstrap-generated/generic/boot.d/*; do \
-	  test -f "$file" || continue; \
-	  case "$file" in \
-	    bootstrap-generated/generic/boot.d/*) dest="$generic_dir/boot.d/${file##*/}" ;; \
-	    *) dest="$generic_dir/${file##*/}" ;; \
+	  test -f "$$file" || continue; \
+	  case "$$file" in \
+	    bootstrap-generated/generic/boot.d/*) dest="$$generic_dir/boot.d/$${file##*/}" ;; \
+	    *) dest="$$generic_dir/$${file##*/}" ;; \
 	  esac; \
-	  if test ! -e "$dest"; then install -m 0644 "$file" "$dest"; \
-	  elif ! cmp -s "$file" "$dest"; then install -m 0644 "$file" "$dest.dinit-new"; fi; \
+	  if test ! -e "$$dest"; then install -m 0644 "$$file" "$$dest"; \
+	  elif ! cmp -s "$$file" "$$dest"; then install -m 0644 "$$file" "$$dest.dinit-new"; fi; \
 	done
 endif
 
