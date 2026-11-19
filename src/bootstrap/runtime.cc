@@ -55,29 +55,56 @@ bool contains(const std::string &value, const char *needle)
     return value.find(needle) != std::string::npos;
 }
 
+std::string trim(std::string value)
+{
+    const std::string::size_type first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return std::string();
+    const std::string::size_type last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+bool is_unknown_marker(const std::string &value)
+{
+    return value.empty() || value == "unknown" || value == "none";
+}
+
+bool contains_cgroup_marker(const std::string &cgroup, const char *marker)
+{
+    std::string::size_type pos = 0;
+    const std::string token(marker);
+    while ((pos = cgroup.find(token, pos)) != std::string::npos) {
+        const bool left = pos == 0 || cgroup[pos - 1] == '/' || cgroup[pos - 1] == ':';
+        const std::string::size_type after = pos + token.size();
+        const bool right = after == cgroup.size() || cgroup[after] == '/' || cgroup[after] == ':';
+        if (left && right) return true;
+        pos = after;
+    }
+    return false;
+}
+
 std::string detect_container()
 {
+    // Explicit runtime indicators only. PID namespace nesting by itself does
+    // not grant the relaxed container mount policy.
     const char *env = std::getenv("container");
-    if (env != nullptr && *env != '\0') return env;
+    if (env != nullptr) {
+        const std::string marker = trim(env);
+        if (!is_unknown_marker(marker)) return marker;
+    }
     if (path_exists("/.dockerenv")) return "docker";
     if (path_exists("/run/.containerenv")) return "podman";
-    if (path_exists("/run/host/container-manager")) {
-        std::string manager = read_file("/run/host/container-manager");
-        return manager.empty() ? "unknown" : manager;
-    }
     if (path_exists("/proc/vz") && !path_exists("/proc/bc")) return "openvz";
 
-    const std::string cgroup = read_file("/proc/1/cgroup");
-    if (contains(cgroup, "docker")) return "docker";
-    if (contains(cgroup, "kubepods")) return "kubernetes";
-    if (contains(cgroup, "libpod")) return "podman";
-    if (contains(cgroup, "lxc")) return "lxc";
+    if (path_exists("/run/host/container-manager")) {
+        const std::string manager = trim(read_file("/run/host/container-manager"));
+        if (!is_unknown_marker(manager)) return manager;
+    }
 
-    const std::string status = read_file("/proc/self/status");
-    const std::string tracer = "TracerPid:\t";
-    const std::string::size_type pos = status.find(tracer);
-    if (pos != std::string::npos && status.compare(pos + tracer.size(), 1, "0") != 0)
-        return "proot";
+    const std::string cgroup = read_file("/proc/1/cgroup");
+    if (contains_cgroup_marker(cgroup, "docker")) return "docker";
+    if (contains_cgroup_marker(cgroup, "kubepods")) return "kubernetes";
+    if (contains_cgroup_marker(cgroup, "libpod")) return "podman";
+    if (contains_cgroup_marker(cgroup, "lxc")) return "lxc";
     return std::string();
 }
 
@@ -148,7 +175,7 @@ mount_info detect_mounts()
 environment_info detect_environment()
 {
     environment_info info;
-    info.pid1 = getpid() == 1;
+    info.pid1 = getppid() == 1;
 
     // NSpid lists one PID for each visible ancestor PID namespace.
     const std::string status = read_file("/proc/self/status");
@@ -178,14 +205,13 @@ environment_info detect_environment()
     else if (mounts.cgroup_v2) info.cgroups = "v2";
     else if (mounts.cgroup_v1) info.cgroups = "v1";
     else info.cgroups = "none";
-    if (!info.container_name.empty()
-            || (info.pid_namespace_depth_known && info.nested_pid_namespace)) {
-        // A nested PID namespace gets container-safe policy even when its
-        // runtime (Docker/LXC/etc.) cannot be identified.
-        info.kind = environment_kind::container;
-    }
-    else if (!info.virtualization.empty()) {
+    // Virtual machines always retain the strict host policy. A container
+    // marker must never override positive virtualization evidence.
+    if (!info.virtualization.empty()) {
         info.kind = environment_kind::virtual_machine;
+    }
+    else if (!info.container_name.empty()) {
+        info.kind = environment_kind::container;
     }
     else if (!info.pid_namespace_depth_known) {
         info.kind = environment_kind::unknown;
@@ -264,38 +290,82 @@ int mount_failure(environment_kind kind, const char *filesystem,
     return 1;
 }
 
+bool ensure_mountpoint_directory(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return true;
+        std::cerr << "dinit-bootstrap: " << path
+                  << " exists but is not a real directory\n";
+        return false;
+    }
+    if (errno != ENOENT) {
+        std::cerr << "dinit-bootstrap: cannot inspect " << path
+                  << ": " << std::strerror(errno) << '\n';
+        return false;
+    }
+    if (mkdir(path, 0755) == 0) return true;
+    if (errno == EEXIST && lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) return true;
+    std::cerr << "dinit-bootstrap: cannot create directory " << path
+              << ": " << std::strerror(errno) << '\n';
+    return false;
+}
+
 int ensure_pseudo_filesystem(const char *name)
 {
-    // procfs is required for normal process/system operation. sysfs may be
-    // unavailable in restricted containers and is therefore skippable there.
-    const bool container_may_skip = std::strcmp(name, "sys") == 0;
-    const environment_kind kind = load_environment_kind();
-    const mount_info current = detect_mounts();
-    const std::string mounted = std::strcmp(name, "proc") == 0
-            ? current.procfs : current.sysfs;
-    const char *mountpoint = std::strcmp(name, "proc") == 0 ? "/proc" : "/sys";
+    if (getppid() != 1) {
+        std::cerr << "dinit-bootstrap: refusing pseudo-filesystem setup: "
+                     "helper is not a direct child of PID 1\n";
+        return 1;
+    }
 
+    const bool is_proc = std::strcmp(name, "proc") == 0;
+    const bool container_may_skip = !is_proc && std::strcmp(name, "sys") == 0;
+    const char *mountpoint = is_proc ? "/proc" : "/sys";
+    const char *filesystem = is_proc ? "proc" : "sysfs";
+    const environment_kind kind = is_proc ? environment_kind::unknown : load_environment_kind();
+
+    if (!ensure_mountpoint_directory(mountpoint)) return 1;
+
+    const mount_info current = detect_mounts();
+    const std::string mounted = is_proc ? current.procfs : current.sysfs;
     if (current.available && !mounted.empty()) {
-        if (mounted == name) {
+        if (mounted == filesystem) {
             std::cout << "dinit-bootstrap: " << mountpoint
-                      << " already mounted as " << name << '\n';
+                      << " already mounted as " << filesystem << '\n';
             return 0;
         }
-        return mount_failure(kind, name,
+        return mount_failure(kind, filesystem,
                 "mountpoint is already occupied by a different filesystem", container_may_skip);
     }
-    // If mountinfo is unavailable (for example because procfs is not mounted
-    // yet), attempt the mount rather than making inspection itself fatal.
 
+    // Before procfs is mounted, mountinfo cannot be read. Try the mount
+    // directly; do not mistake an existing directory for an existing mount.
     const unsigned long flags = MS_NOSUID | MS_NODEV | MS_NOEXEC;
-    if (mount(name, mountpoint, name, flags, nullptr) == 0) {
-        std::cout << "dinit-bootstrap: mounted " << name
-                  << " on " << mountpoint << '\n';
-        return 0;
-    }
+    const unsigned int max_attempts =
+            (!is_proc && kind != environment_kind::container) ? 2 : 1;
+    for (unsigned int attempt = 1; attempt <= max_attempts; ++attempt) {
+        if (mount(filesystem, mountpoint, filesystem, flags, nullptr) == 0) {
+            std::cout << "dinit-bootstrap: mounted " << filesystem
+                      << " on " << mountpoint << '\n';
+            return 0;
+        }
 
-    const std::string reason = std::strerror(errno);
-    return mount_failure(kind, name, reason.c_str(), container_may_skip);
+        const int mount_error = errno;
+        const mount_info refreshed = detect_mounts();
+        const std::string refreshed_mount = is_proc ? refreshed.procfs : refreshed.sysfs;
+        if (refreshed.available && refreshed_mount == filesystem) {
+            std::cout << "dinit-bootstrap: " << mountpoint
+                      << " became available as " << filesystem << '\n';
+            return 0;
+        }
+        if (attempt == max_attempts) {
+            const std::string reason = std::strerror(mount_error);
+            return mount_failure(kind, filesystem, reason.c_str(), container_may_skip);
+        }
+        sleep(1);
+    }
+    return 1;
 }
 
 int run_detect(bool stay)
@@ -314,7 +384,7 @@ int run_detect(bool stay)
 
     const environment_info info = detect_environment();
     std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
-              << "dinit-bootstrap: PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
+              << "dinit-bootstrap: Dinit parent is PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
               << "dinit-bootstrap: nested PID namespace: "
               << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
               << "dinit-bootstrap: procfs: "
@@ -331,7 +401,7 @@ int run_detect(bool stay)
                   << " (using bare-metal policy)\n";
 
     if (!info.pid1) {
-        std::cerr << "dinit-bootstrap: refusing system bootstrap: Dinit is not PID 1\n";
+        std::cerr << "dinit-bootstrap: refusing system bootstrap: helper parent is not PID 1\n";
         return 1;
     }
     if (!write_state(info)) return 1;
