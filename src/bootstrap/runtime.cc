@@ -21,7 +21,7 @@ enum class environment_kind { bare_metal, virtual_machine, container, unknown };
 
 struct environment_info {
     bool pid1;
-    bool pid_namespace;
+    bool nested_pid_namespace;
     environment_kind kind;
     std::string container_name;
     std::string virtualization;
@@ -93,12 +93,18 @@ environment_info detect_environment()
     environment_info info;
     info.pid1 = getpid() == 1;
 
-    struct stat self_ns;
-    struct stat init_ns;
-    info.pid_namespace = stat("/proc/self/ns/pid", &self_ns) == 0
-            && stat("/proc/1/ns/pid", &init_ns) == 0
-            && self_ns.st_ino == init_ns.st_ino
-            && self_ns.st_dev == init_ns.st_dev;
+    // NSpid lists one PID for each visible ancestor PID namespace.
+    const std::string status = read_file("/proc/self/status");
+    const std::string nspid = "NSpid:";
+    const std::string::size_type nspid_pos = status.find(nspid);
+    info.nested_pid_namespace = false;
+    if (nspid_pos != std::string::npos) {
+        std::istringstream values(status.substr(nspid_pos + nspid.size()));
+        std::string value;
+        unsigned int count = 0;
+        while (values >> value && value.find(':') == std::string::npos) ++count;
+        info.nested_pid_namespace = count > 1;
+    }
 
     info.container_name = detect_container();
     info.virtualization = detect_virtual_machine();
@@ -133,7 +139,7 @@ bool write_state(const environment_info &info)
     }
     output << "kind=" << kind_name(info.kind) << '\n'
            << "pid1=" << (info.pid1 ? "yes" : "no") << '\n'
-           << "pid-namespace=" << (info.pid_namespace ? "yes" : "no") << '\n'
+           << "nested-pid-namespace=" << (info.nested_pid_namespace ? "yes" : "no") << '\n'
            << "container=" << (info.container_name.empty() ? "none" : info.container_name) << '\n'
            << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n';
     return output.good();
@@ -144,7 +150,7 @@ int run_detect(bool stay)
     const environment_info info = detect_environment();
     std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
               << "dinit-bootstrap: PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
-              << "dinit-bootstrap: PID namespace visible: "
+              << "dinit-bootstrap: nested PID namespace: "
               << (info.pid_namespace ? "yes" : "no") << '\n';
     if (!info.container_name.empty())
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
