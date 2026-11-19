@@ -15,7 +15,8 @@ references.
 
 * Bare metal and virtual machines use the same host initialization policy.
 * Containers use a container policy and must not repeat host-owned mounts or
-  other host setup.
+  other host setup. A nested PID namespace is sufficient to select this conservative
+  policy even when Docker/LXC/etc. cannot be identified.
 * Unknown environments are handled conservatively.
 * The environment service requires Dinit to be PID 1 in its current PID
   namespace. A non-PID-1 Dinit instance must not run system Bootstrap.
@@ -23,8 +24,9 @@ references.
   are optional and must be detected at runtime.
 
 The runtime detector writes its result to /run/dinit/environment. The state records PID 1 and PID namespace information, container/VM classification, the root filesystem type, procfs/sysfs mount status, the /dev filesystem type, and cgroup v1/v2/hybrid mount presence. Unknown detection results remain explicitly unknown; they are not silently treated as host defaults.
-The service remains supervised after detection so that Dinit can treat the
-environment service as active until the rest of the boot sequence is stopped.
+The `bootstrap-environment` service remains supervised after detection. It uses Dinit's
+`ready-notification = pipefd:4` mechanism and reports readiness only after the state file has
+been written, preventing dependent services from racing environment detection.
 
 ## Build model
 
