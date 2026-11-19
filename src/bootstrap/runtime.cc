@@ -22,6 +22,7 @@ enum class environment_kind { bare_metal, virtual_machine, container, unknown };
 struct environment_info {
     bool pid1;
     bool nested_pid_namespace;
+    bool pid_namespace_depth_known;
     environment_kind kind;
     std::string container_name;
     std::string virtualization;
@@ -98,7 +99,8 @@ environment_info detect_environment()
     const std::string nspid = "NSpid:";
     const std::string::size_type nspid_pos = status.find(nspid);
     info.nested_pid_namespace = false;
-    if (nspid_pos != std::string::npos) {
+    info.pid_namespace_depth_known = nspid_pos != std::string::npos;
+    if (info.pid_namespace_depth_known) {
         std::istringstream values(status.substr(nspid_pos + nspid.size()));
         std::string value;
         unsigned int count = 0;
@@ -107,12 +109,11 @@ environment_info detect_environment()
     }
 
     info.container_name = detect_container();
-    if (info.container_name.empty() && info.nested_pid_namespace)
-        info.container_name = "pid-namespace";
     info.virtualization = detect_virtual_machine();
     if (!info.container_name.empty()) info.kind = environment_kind::container;
     else if (!info.virtualization.empty()) info.kind = environment_kind::virtual_machine;
-    else if (info.pid1) info.kind = environment_kind::bare_metal;
+    else if (info.pid1 && info.pid_namespace_depth_known && !info.nested_pid_namespace)
+        info.kind = environment_kind::bare_metal;
     else info.kind = environment_kind::unknown;
     return info;
 }
@@ -129,6 +130,10 @@ const char *kind_name(environment_kind kind)
 
 bool write_state(const environment_info &info)
 {
+    if (mkdir("/run", 0755) != 0 && errno != EEXIST) {
+        std::cerr << "dinit-bootstrap: cannot create /run: " << std::strerror(errno) << '\n';
+        return false;
+    }
     if (mkdir("/run/dinit", 0755) != 0 && errno != EEXIST) {
         std::cerr << "dinit-bootstrap: cannot create /run/dinit: "
                   << std::strerror(errno) << '\n';
@@ -141,7 +146,7 @@ bool write_state(const environment_info &info)
     }
     output << "kind=" << kind_name(info.kind) << '\n'
            << "pid1=" << (info.pid1 ? "yes" : "no") << '\n'
-           << "nested-pid-namespace=" << (info.nested_pid_namespace ? "yes" : "no") << '\n'
+           << "nested-pid-namespace=" << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
            << "container=" << (info.container_name.empty() ? "none" : info.container_name) << '\n'
            << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n';
     return output.good();
@@ -153,7 +158,7 @@ int run_detect(bool stay)
     std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
               << "dinit-bootstrap: PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
               << "dinit-bootstrap: nested PID namespace: "
-              << (info.nested_pid_namespace ? "yes" : "no") << '\n';
+              << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n';
     if (!info.container_name.empty())
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
     if (!info.virtualization.empty())
@@ -173,9 +178,19 @@ int run_detect(bool stay)
     sigaddset(&signals, SIGINT);
     sigaddset(&signals, SIGHUP);
     if (sigprocmask(SIG_BLOCK, &signals, nullptr) != 0) {
-        std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\n';
+        std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\\n';
         return 1;
     }
+
+    // Dinit's ready-notification pipe prevents dependent services from racing
+    // the environment-state write above.
+    const char ready_message[] = "READY\\n";
+    if (write(4, ready_message, sizeof(ready_message) - 1)
+            != static_cast<ssize_t>(sizeof(ready_message) - 1)) {
+        std::cerr << "dinit-bootstrap: failed to notify Dinit that detection is ready\\n";
+        return 1;
+    }
+
     int signal_number = 0;
     while (sigwait(&signals, &signal_number) == EINTR) {}
     return 0;
