@@ -244,7 +244,14 @@ int run_detect(bool stay)
     std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
               << "dinit-bootstrap: PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
               << "dinit-bootstrap: nested PID namespace: "
-              << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n';
+              << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
+              << "dinit-bootstrap: procfs: "
+              << (info.mountinfo_available ? (info.procfs == "proc" ? "mounted" : "not mounted") : "unknown") << '\n'
+              << "dinit-bootstrap: sysfs: "
+              << (info.mountinfo_available ? (info.sysfs == "sysfs" ? "mounted" : "not mounted") : "unknown") << '\n'
+              << "dinit-bootstrap: root filesystem: "
+              << (info.root_fs_type.empty() ? "unknown" : info.root_fs_type) << '\n'
+              << "dinit-bootstrap: cgroups: " << info.cgroups << '\n';
     if (!info.container_name.empty())
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
     if (!info.virtualization.empty())
