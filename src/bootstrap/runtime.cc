@@ -409,6 +409,87 @@ int ensure_pseudo_filesystem(const char *name)
     return 1;
 }
 
+
+std::string mounted_filesystem(const char *mountpoint)
+{
+    FILE *mounts = setmntent("/proc/self/mounts", "r");
+    if (mounts == nullptr) return std::string();
+    std::string filesystem;
+    struct mntent *entry;
+    while ((entry = getmntent(mounts)) != nullptr) {
+        if (std::strcmp(entry->mnt_dir, mountpoint) == 0) {
+            filesystem = entry->mnt_type;
+            break;
+        }
+    }
+    endmntent(mounts);
+    return filesystem;
+}
+
+int ensure_device_filesystem(const char *mountpoint, const char *filesystem,
+        unsigned long flags, const char *options, bool accept_existing_any)
+{
+    if (getppid() != 1) {
+        std::cerr << "dinit-bootstrap: refusing device filesystem setup: "
+                     "helper is not a direct child of PID 1\n";
+        return 1;
+    }
+    if (!ensure_mountpoint_directory(mountpoint)) return 1;
+
+    const std::string current = mounted_filesystem(mountpoint);
+    if (!current.empty()) {
+        if (current == filesystem || accept_existing_any) {
+            std::cout << "dinit-bootstrap: " << mountpoint
+                      << " already mounted as " << current << '\n';
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: " << mountpoint << " is mounted as "
+                  << current << ", expected " << filesystem << '\n';
+        return 1;
+    }
+
+    const environment_kind kind = load_environment_kind();
+    if (mount(filesystem, mountpoint, filesystem, flags, options) == 0) {
+        std::cout << "dinit-bootstrap: mounted " << filesystem
+                  << " on " << mountpoint << '\n';
+        return 0;
+    }
+    const int mount_error = errno;
+    const std::string refreshed = mounted_filesystem(mountpoint);
+    if (!refreshed.empty()) {
+        if (refreshed == filesystem || accept_existing_any) {
+            std::cout << "dinit-bootstrap: " << mountpoint
+                      << " became available as " << refreshed << '\n';
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: " << mountpoint
+                  << " became occupied by " << refreshed << '\n';
+        return 1;
+    }
+    return mount_failure(kind, filesystem, std::strerror(mount_error),
+            kind == environment_kind::container);
+}
+
+int ensure_dev()
+{
+    // A runtime-provided bind mount or devtmpfs is already authoritative.
+    // Never cover an existing /dev mount from inside a container.
+    return ensure_device_filesystem("/dev", "devtmpfs",
+            MS_NOSUID, "mode=0755", true);
+}
+
+int ensure_devpts()
+{
+    return ensure_device_filesystem("/dev/pts", "devpts",
+            MS_NOSUID | MS_NOEXEC, "mode=0620,ptmxmode=0666", false);
+}
+
+int ensure_shm()
+{
+    return ensure_device_filesystem("/dev/shm", "tmpfs",
+            MS_NOSUID | MS_NODEV, "mode=1777", false);
+}
+
 std::string find_executable(const std::string &name)
 {
     if (name.find('/') != std::string::npos)
@@ -815,6 +896,9 @@ int main(int argc, char **argv)
         std::cerr << "dinit-bootstrap: unknown pseudo filesystem: " << argv[2] << '\n';
         return 2;
     }
+    if (argc >= 2 && std::strcmp(argv[1], "mount-dev") == 0) return ensure_dev();
+    if (argc >= 2 && std::strcmp(argv[1], "mount-devpts") == 0) return ensure_devpts();
+    if (argc >= 2 && std::strcmp(argv[1], "mount-shm") == 0) return ensure_shm();
     if (argc >= 2 && std::strcmp(argv[1], "fsck-root") == 0) return run_root_fsck();
     if (argc >= 2 && std::strcmp(argv[1], "fsck-local") == 0) return run_local_fsck();
     if (argc >= 2 && std::strcmp(argv[1], "mount-local") == 0) return run_mount_local();
@@ -822,7 +906,7 @@ int main(int argc, char **argv)
     if (argc >= 2 && std::strcmp(argv[1], "swap-on") == 0) return run_swap_on();
     if (argc < 2 || std::strcmp(argv[1], "detect") != 0) {
         std::cerr << "Usage: dinit-bootstrap detect [--stay] | mount-pseudo proc|sys"
-                     " | fsck-root | fsck-local | mount-local | root-rw | swap-on\n";
+                     " | mount-dev | mount-devpts | mount-shm | fsck-root | fsck-local | mount-local | root-rw | swap-on\n";
         return 2;
     }
     return run_detect(argc > 2 && std::strcmp(argv[2], "--stay") == 0);

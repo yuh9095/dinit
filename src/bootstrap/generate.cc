@@ -83,8 +83,18 @@ int main(int argc, char **argv)
     const std::string sys =
         "type = scripted\ncommand = " + helper_path + " mount-pseudo sys\nrestart = false\n"
         "depends-on: bootstrap-environment\n";
+    const std::string dev =
+        "type = scripted\ncommand = " + helper_path + " mount-dev\nrestart = false\n"
+        "depends-on: bootstrap-environment\n";
+    const std::string devpts =
+        "type = scripted\ncommand = " + helper_path + " mount-devpts\nrestart = false\n"
+        "depends-on: bootstrap-dev\n";
+    const std::string shm =
+        "type = scripted\ncommand = " + helper_path + " mount-shm\nrestart = false\n"
+        "depends-on: bootstrap-dev\n";
     const std::string pseudofs =
-        "type = internal\ndepends-on: bootstrap-proc\ndepends-on: bootstrap-sys\n";
+        "type = internal\ndepends-on: bootstrap-proc\ndepends-on: bootstrap-sys\n"
+        "depends-on: bootstrap-devpts\ndepends-on: bootstrap-shm\n";
     const std::string early_prepare =
         "type = internal\ndepends-on: pseudofs\n";
     const std::string root_fsck =
@@ -118,6 +128,9 @@ int main(int argc, char **argv)
     ok = write_service(early_dir, "bootstrap-environment", environment) && ok;
     ok = write_service(early_dir, "bootstrap-proc", proc) && ok;
     ok = write_service(early_dir, "bootstrap-sys", sys) && ok;
+    ok = write_service(early_dir, "bootstrap-dev", dev) && ok;
+    ok = write_service(early_dir, "bootstrap-devpts", devpts) && ok;
+    ok = write_service(early_dir, "bootstrap-shm", shm) && ok;
     ok = write_service(early_dir, "pseudofs", pseudofs) && ok;
     ok = write_service(early_dir, "early-prepare.target", early_prepare) && ok;
     ok = write_service(early_dir, "early-root-fsck", root_fsck) && ok;

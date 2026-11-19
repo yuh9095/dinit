@@ -21,14 +21,17 @@ boot arrangement must add pre-local.target to their own boot dependency graph.
 1. bootstrap-proc validates or mounts procfs.
 2. bootstrap-environment inspects PID namespace, container/VM indicators and mounts.
 3. bootstrap-sys prepares sysfs according to the detected environment policy.
-4. early-prepare.target aggregates the pseudofilesystem stage.
-5. early-root-fsck checks a root block device when a matching fsck helper exists.
-6. early-root-rw.target remounts the root filesystem read-write when required.
-7. early-fs-pre.target provides a waits-for.d extension point for optional storage activation.
-8. early-fs-fsck checks eligible local fstab filesystems before mounting.
-9. early-fs-fstab.target mounts local fstab entries, excluding network and pseudo filesystems.
-10. early-fs-local.target marks local filesystem preparation complete.
-11. early-swap enables fstab swap; pre-local.target marks core local startup complete.
+4. bootstrap-dev prepares /dev without covering a runtime-provided mount.
+5. bootstrap-devpts prepares /dev/pts, preserving an existing devpts mount.
+6. bootstrap-shm prepares /dev/shm as tmpfs when it is not already mounted.
+7. early-prepare.target aggregates the pseudofilesystem and device-filesystem stage.
+8. early-root-fsck checks a root block device when a matching fsck helper exists.
+9. early-root-rw.target remounts the root filesystem read-write when required.
+10. early-fs-pre.target provides a waits-for.d extension point for optional storage activation.
+11. early-fs-fsck checks eligible local fstab filesystems before mounting.
+12. early-fs-fstab.target mounts local fstab entries, excluding network and pseudo filesystems.
+13. early-fs-local.target marks local filesystem preparation complete.
+14. early-swap enables fstab swap; pre-local.target marks core local startup complete.
 
 The dependency graph uses native Dinit relationships: hard dependencies for
 required preparation, milestone dependencies for successful prerequisites,
