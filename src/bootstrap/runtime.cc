@@ -156,7 +156,7 @@ int run_detect(bool stay)
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
     if (!info.virtualization.empty())
         std::cout << "dinit-bootstrap: virtualization: " << info.virtualization
-                  << " (using bare-metal policy)\\n";
+                  << " (using bare-metal policy)\n";
 
     if (!info.pid1) {
         std::cerr << "dinit-bootstrap: refusing system bootstrap: Dinit is not PID 1\n";
