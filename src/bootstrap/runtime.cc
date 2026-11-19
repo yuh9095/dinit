@@ -110,11 +110,24 @@ environment_info detect_environment()
 
     info.container_name = detect_container();
     info.virtualization = detect_virtual_machine();
-    if (!info.container_name.empty()) info.kind = environment_kind::container;
-    else if (!info.virtualization.empty()) info.kind = environment_kind::virtual_machine;
-    else if (info.pid1 && info.pid_namespace_depth_known && !info.nested_pid_namespace)
+    if (!info.container_name.empty()
+            || (info.pid_namespace_depth_known && info.nested_pid_namespace)) {
+        // A nested PID namespace gets container-safe policy even when its
+        // runtime (Docker/LXC/etc.) cannot be identified.
+        info.kind = environment_kind::container;
+    }
+    else if (!info.pid_namespace_depth_known) {
+        info.kind = environment_kind::unknown;
+    }
+    else if (!info.virtualization.empty()) {
+        info.kind = environment_kind::virtual_machine;
+    }
+    else if (info.pid1) {
         info.kind = environment_kind::bare_metal;
-    else info.kind = environment_kind::unknown;
+    }
+    else {
+        info.kind = environment_kind::unknown;
+    }
     return info;
 }
 
