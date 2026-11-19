@@ -37,6 +37,17 @@ bool write_file(const std::string &path, const std::string &contents)
     return true;
 }
 
+std::string quote_dinit_value(const std::string &value)
+{
+    std::string quoted = "\"";
+    for (std::string::size_type i = 0; i < value.size(); ++i) {
+        if (value[i] == '\\' || value[i] == '"') quoted += '\\';
+        quoted += value[i];
+    }
+    quoted += '"';
+    return quoted;
+}
+
 bool write_service(const std::string &directory, const std::string &name,
         const std::string &contents)
 {
@@ -53,8 +64,8 @@ int main(int argc, char **argv)
         return 2;
     }
     const std::string output_dir(argv[1]);
-    const std::string helper_path(argv[2]);
-    const std::string generic_service_dir(argv[3]);
+    const std::string helper_path = quote_dinit_value(argv[2]);
+    const std::string generic_service_dir = quote_dinit_value(argv[3]);
     const std::string early_dir = output_dir + "/early";
     const std::string generic_dir = output_dir + "/generic";
     const std::string boot_dir = generic_dir + "/boot.d";
@@ -84,7 +95,7 @@ int main(int argc, char **argv)
         "depends-ms: early-root-fsck\n";
     const std::string fs_pre =
         "type = internal\ndepends-on: early-prepare.target\n"
-        "waits-for.d: " + generic_service_dir + "/early-fs-pre.d\n";
+        "waits-for.d: " + generic_service_dir + "/early-fs-pre.d\"\n";
     const std::string fsck_local =
         "type = scripted\ncommand = " + helper_path + " fsck-local\nrestart = false\n"
         "depends-on: early-fs-pre.target\n";
