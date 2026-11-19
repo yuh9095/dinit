@@ -20,10 +20,10 @@ all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)
 
 ifeq ($(ENABLE_BOOTSTRAP),yes)
 all: bootstrap
-CXX_FOR_BUILD ?= $(CXX)
-CXXFLAGS_FOR_BUILD ?= $(CXXFLAGS)
-CPPFLAGS_FOR_BUILD ?= $(CPPFLAGS)
-LDFLAGS_FOR_BUILD ?= $(LDFLAGS)
+CXX_FOR_BUILD ?= c++
+CPPFLAGS_FOR_BUILD ?=
+CXXFLAGS_FOR_BUILD ?= -O2
+LDFLAGS_FOR_BUILD ?=
 
 .PHONY: bootstrap bootstrap-generated
 bootstrap: dinit-bootstrap bootstrap-generated
@@ -84,11 +84,18 @@ ifeq ($(BUILD_SHUTDOWN),yes)
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)poweroff
 endif
 ifeq ($(ENABLE_BOOTSTRAP),yes)
-	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-fs-pre.d
+	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-fs-pre.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-devices.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/network.d
 	install $(STRIPOPTS) dinit-bootstrap $(DESTDIR)$(BOOTSTRAP_LIBDIR)/dinit-bootstrap
 	install -m 0644 bootstrap-generated/early/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
-	install -m 0644 bootstrap-generated/generic/*.target $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/
-	install -m 0644 bootstrap-generated/generic/boot.d/* $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d/
+	@set -e; for file in bootstrap-generated/generic/* bootstrap-generated/generic/boot.d/*; do \
+	  test -f "$$file" || continue; \
+	  case "$$file" in \
+	    bootstrap-generated/generic/boot.d/*) dest="$(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d/$${file##*/}" ;; \
+	    *) dest="$(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/$${file##*/}" ;; \
+	  esac; \
+	  if test ! -e "$$dest"; then install -m 0644 "$$file" "$$dest"; \
+	  elif ! cmp -s "$$file" "$$dest"; then install -m 0644 "$$file" "$$dest.dinit-new"; fi; \
+	done
 endif
 
 clean:

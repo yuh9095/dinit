@@ -69,9 +69,11 @@ int main(int argc, char **argv)
     const std::string early_dir = output_dir + "/early";
     const std::string generic_dir = output_dir + "/generic";
     const std::string boot_dir = generic_dir + "/boot.d";
+    const std::string fs_pre_dir = generic_dir + "/early-fs-pre.d";
     if (!make_directory(output_dir) || !make_directory(early_dir) ||
             !make_directory(generic_dir) || !make_directory(boot_dir) ||
-            !make_directory(generic_dir + "/early-fs-pre.d"))
+            !make_directory(fs_pre_dir) || !make_directory(generic_dir + "/early-devices.d") ||
+            !make_directory(generic_dir + "/network.d"))
         return 1;
 
     const std::string environment =
@@ -103,9 +105,32 @@ int main(int argc, char **argv)
     const std::string root_rw =
         "type = scripted\ncommand = " + helper_path + " root-rw\nrestart = false\n"
         "depends-ms: early-root-fsck\n";
+    const std::string modules =
+        "type = scripted\ncommand = " + helper_path + " modules-load\nrestart = false\n"
+        "depends-on: early-prepare.target\n";
+    const std::string hostname =
+        "type = scripted\ncommand = " + helper_path + " set-hostname\nrestart = false\n"
+        "depends-on: early-prepare.target\n";
+    const std::string sysctl =
+        "type = scripted\ncommand = " + helper_path + " sysctl-load\nrestart = false\n"
+        "depends-on: early-net-lo\ndepends-on: early-hostname\n";
+    const std::string loopback =
+        "type = scripted\ncommand = " + helper_path + " loopback-up\nrestart = false\n"
+        "depends-on: early-devices.target\n";
+    const std::string hwclock =
+        "type = scripted\ncommand = " + helper_path + " hwclock\nrestart = false\n"
+        "depends-on: early-prepare.target\n";
+    const std::string machine_id =
+        "type = scripted\ncommand = " + helper_path + " machine-id\nrestart = false\n"
+        "depends-ms: early-root-rw.target\n";
+    const std::string devd =
+        "type = internal\ndepends-on: early-modules\n"
+        "depends-ms.d: " + quote_dinit_value(generic_service_dir + "/early-devices.d") + "\n";
+    const std::string devices =
+        "type = internal\ndepends-on: early-devd\n";
     const std::string fs_pre =
-        "type = internal\ndepends-on: early-prepare.target\n"
-        "waits-for.d: " + quote_dinit_value(generic_service_dir + "/early-fs-pre.d") + "\n";
+        "type = internal\ndepends-on: early-devices.target\n"
+        "depends-ms.d: " + quote_dinit_value(generic_service_dir + "/early-fs-pre.d") + "\n";
     const std::string fsck_local =
         "type = scripted\ncommand = " + helper_path + " fsck-local\nrestart = false\n"
         "depends-on: early-fs-pre.target\n";
@@ -119,10 +144,17 @@ int main(int argc, char **argv)
     const std::string swap =
         "type = scripted\ncommand = " + helper_path + " swap-on\nrestart = false\n"
         "depends-on: early-fs-local.target\n";
+    const std::string local_fs =
+        "type = internal\ndepends-on: early-fs-local.target\n";
     const std::string pre_local =
-        "type = internal\ndepends-on: early-fs-local.target\nwaits-for: early-swap\n";
+        "type = internal\ndepends-on: local-fs.target\ndepends-on: early-sysctl\n"
+        "depends-on: early-hwclock\ndepends-on: early-machine-id\nwaits-for: early-swap\n";
     const std::string local =
         "type = internal\ndepends-on: pre-local.target\n";
+    const std::string network =
+        "type = internal\ndepends-on: early-net-lo\nwaits-for.d: " + quote_dinit_value(generic_service_dir + "/network.d") + "\n";
+    const std::string multi_user =
+        "type = internal\ndepends-on: local.target\ndepends-on: network.target\n";
 
     bool ok = true;
     ok = write_service(early_dir, "bootstrap-environment", environment) && ok;
@@ -133,15 +165,26 @@ int main(int argc, char **argv)
     ok = write_service(early_dir, "bootstrap-shm", shm) && ok;
     ok = write_service(early_dir, "pseudofs", pseudofs) && ok;
     ok = write_service(early_dir, "early-prepare.target", early_prepare) && ok;
+    ok = write_service(early_dir, "early-modules", modules) && ok;
+    ok = write_service(generic_dir, "early-hostname", hostname) && ok;
+    ok = write_service(generic_dir, "early-sysctl", sysctl) && ok;
+    ok = write_service(generic_dir, "early-net-lo", loopback) && ok;
+    ok = write_service(generic_dir, "early-hwclock", hwclock) && ok;
+    ok = write_service(generic_dir, "early-machine-id", machine_id) && ok;
+    ok = write_service(early_dir, "early-devd", devd) && ok;
+    ok = write_service(early_dir, "early-devices.target", devices) && ok;
     ok = write_service(early_dir, "early-root-fsck", root_fsck) && ok;
     ok = write_service(early_dir, "early-root-rw.target", root_rw) && ok;
     ok = write_service(early_dir, "early-fs-pre.target", fs_pre) && ok;
     ok = write_service(early_dir, "early-fs-fsck", fsck_local) && ok;
     ok = write_service(early_dir, "early-fs-fstab.target", fs_fstab) && ok;
     ok = write_service(early_dir, "early-fs-local.target", fs_local) && ok;
-    ok = write_service(early_dir, "early-swap", swap) && ok;
+    ok = write_service(generic_dir, "early-swap", swap) && ok;
+    ok = write_service(generic_dir, "local-fs.target", local_fs) && ok;
     ok = write_service(generic_dir, "pre-local.target", pre_local) && ok;
     ok = write_service(generic_dir, "local.target", local) && ok;
+    ok = write_service(generic_dir, "network.target", network) && ok;
+    ok = write_service(generic_dir, "multi-user.target", multi_user) && ok;
     ok = write_file(boot_dir + "/pre-local.target",
             "# Generated activation marker; consumed by a boot service using waits-for.d.\n") && ok;
     return ok ? 0 : 1;

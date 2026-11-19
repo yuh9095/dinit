@@ -1,16 +1,25 @@
 // Linux Bootstrap runtime support for Dinit.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
 // This program is part of the generated dinit.d service package.
 
 #include <cerrno>
+#include <dirent.h>
 #include <signal.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <mntent.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
+#include <set>
 #include <string>
 
 #include <sys/mount.h>
@@ -481,13 +490,13 @@ int ensure_dev()
 int ensure_devpts()
 {
     return ensure_device_filesystem("/dev/pts", "devpts",
-            MS_NOSUID | MS_NOEXEC, "mode=0620,ptmxmode=0666", false);
+            MS_NOSUID | MS_NOEXEC, "mode=0620,ptmxmode=0666", true);
 }
 
 int ensure_shm()
 {
     return ensure_device_filesystem("/dev/shm", "tmpfs",
-            MS_NOSUID | MS_NODEV, "mode=1777", false);
+            MS_NOSUID | MS_NODEV, "mode=1777", true);
 }
 
 std::string find_executable(const std::string &name)
@@ -692,63 +701,18 @@ fsck_options read_fsck_options()
 
 int run_root_fsck()
 {
+    // Dinit is started after the kernel has mounted the root filesystem.
+    // Running a repairing fsck against that mounted block device is unsafe.
+    // Root filesystem checks belong in the initramfs, before the real root
+    // filesystem is mounted and handed over to PID 1.
     if (load_environment_kind() == environment_kind::container) {
         std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
-        return 0;
     }
-    const fsck_options options = read_fsck_options();
-    if (options.skip) return 0;
-    if (!executable_in_path("fsck")) {
-        std::cout << "dinit-bootstrap: fsck is not installed; skipping root check\n";
-        return 0;
+    else {
+        std::cout << "dinit-bootstrap: root filesystem is already mounted; "
+                     "root fsck must be performed by the initramfs\n";
     }
-    FILE *fstab = setmntent("/etc/fstab", "r");
-    if (fstab != nullptr) {
-        struct mntent *entry;
-        while ((entry = getmntent(fstab)) != nullptr) {
-            if (std::strcmp(entry->mnt_dir, "/") == 0 && entry->mnt_passno == 0) {
-                endmntent(fstab);
-                std::cout << "dinit-bootstrap: root check disabled by fstab pass number\n";
-                return 0;
-            }
-        }
-        endmntent(fstab);
-    }
-    FILE *mounts = setmntent("/proc/self/mounts", "r");
-    if (mounts == nullptr) {
-        std::cerr << "dinit-bootstrap: cannot read /proc/self/mounts for root fsck\n";
-        return 1;
-    }
-    std::string device, filesystem;
-    struct mntent *entry;
-    while ((entry = getmntent(mounts)) != nullptr) {
-        if (std::strcmp(entry->mnt_dir, "/") == 0) {
-            device = entry->mnt_fsname; filesystem = entry->mnt_type; break;
-        }
-    }
-    endmntent(mounts);
-    struct stat device_stat;
-    if (device.empty() || stat(device.c_str(), &device_stat) != 0 ||
-            !S_ISBLK(device_stat.st_mode)) {
-        std::cout << "dinit-bootstrap: root is not a checkable block device; skipping root fsck\n";
-        return 0;
-    }
-    if (filesystem.empty() || !executable_in_path("fsck." + filesystem)) {
-        std::cout << "dinit-bootstrap: no fsck helper for root filesystem "
-                  << filesystem << "; skipping\n";
-        return 0;
-    }
-    std::vector<std::string> args;
-    args.push_back("fsck"); args.push_back("-C");
-    if (options.force) args.push_back("-f");
-    args.push_back(options.repair); args.push_back("-t");
-    args.push_back(filesystem); args.push_back(device);
-    std::cout << "dinit-bootstrap: checking root filesystem " << device << '\n';
-    const int result = execute_program(args, false);
-    if (result == 0 || result == 1) return 0;
-    std::cerr << "dinit-bootstrap: root fsck requires intervention or reboot (status "
-              << result << ")\n";
-    return 1;
+    return 0;
 }
 
 int run_local_fsck()
@@ -782,7 +746,7 @@ int run_mount_local()
     }
     std::vector<std::string> args;
     args.push_back("mount"); args.push_back("-a"); args.push_back("-t");
-    args.push_back("nosysfs,nonfs,nonfs4,nosmbfs,nocifs");
+    args.push_back("nosysfs,nfs,nfs4,smbfs,cifs");
     args.push_back("-O"); args.push_back("no_netdev");
     return execute_program(args, false);
 }
@@ -825,6 +789,354 @@ int run_swap_on()
     std::vector<std::string> args;
     args.push_back("swapon"); args.push_back("-a");
     return execute_program(args, true);
+}
+
+std::map<std::string, std::string> collect_config_files(const char *subdirectory)
+{
+    const char *prefixes[] = { "/etc", "/run", "/usr/local/lib", "/usr/lib", "/lib" };
+    std::map<std::string, std::string> files;
+    for (const char *prefix : prefixes) {
+        const std::string directory = std::string(prefix) + "/" + subdirectory;
+        DIR *handle = opendir(directory.c_str());
+        if (handle == nullptr) continue;
+        struct dirent *entry;
+        while ((entry = readdir(handle)) != nullptr) {
+            const std::string name(entry->d_name);
+            if (name.size() <= 5 || name[0] == '.' ||
+                    name.compare(name.size() - 5, 5, ".conf") != 0 ||
+                    files.find(name) != files.end())
+                continue;
+            const std::string path = directory + "/" + name;
+            // Record the name before checking the target so /dev/null symlinks
+            // mask lower-priority vendor files just like standard drop-in dirs.
+            files[name] = std::string();
+            struct stat st;
+            if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+                files[name] = path;
+        }
+        closedir(handle);
+    }
+    return files;
+}
+
+int run_modules_load()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: module loading is skipped inside a container\n";
+        return 0;
+    }
+    if (find_executable("modprobe").empty()) {
+        std::cout << "dinit-bootstrap: modprobe is not installed; skipping module loading\n";
+        return 0;
+    }
+
+    const std::map<std::string, std::string> files = collect_config_files("modules-load.d");
+    std::set<std::string> loaded;
+    unsigned int failures = 0;
+    for (std::map<std::string, std::string>::const_iterator file = files.begin();
+            file != files.end(); ++file) {
+        if (file->second.empty()) continue;
+        std::istringstream contents(read_file(file->second.c_str()));
+        std::string line;
+        while (std::getline(contents, line)) {
+            const std::string::size_type comment = line.find('#');
+            if (comment != std::string::npos) line.erase(comment);
+            std::istringstream fields(line);
+            std::string module;
+            if (!(fields >> module)) continue;
+            if (module[0] == '-') {
+                std::cerr << "dinit-bootstrap: ignoring invalid module name in "
+                          << file->second << '\n';
+                continue;
+            }
+            bool valid = true;
+            for (std::string::size_type i = 0; i < module.size(); ++i) {
+                const char ch = module[i];
+                if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.')) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) {
+                std::cerr << "dinit-bootstrap: ignoring invalid module name in "
+                          << file->second << '\n';
+                continue;
+            }
+            if (!loaded.insert(module).second) continue;
+            std::vector<std::string> args;
+            args.push_back("modprobe");
+            args.push_back(module);
+            const int result = execute_program(args, false);
+            if (result != 0) {
+                ++failures;
+                std::cerr << "dinit-bootstrap: could not load module " << module
+                          << " (status " << result << "); continuing\n";
+            }
+        }
+    }
+    std::cout << "dinit-bootstrap: module loading completed; "
+              << failures << " module(s) failed\n";
+    return 0;
+}
+
+int run_set_hostname()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: hostname is supplied by the container runtime; leaving it unchanged\n";
+        return 0;
+    }
+    const std::string hostname = trim(read_file("/etc/hostname"));
+    if (hostname.empty()) {
+        std::cout << "dinit-bootstrap: /etc/hostname is empty or unavailable; skipping hostname setup\n";
+        return 0;
+    }
+    if (hostname.size() > 64 || hostname.find_first_of(" \t\r\n") != std::string::npos) {
+        std::cerr << "dinit-bootstrap: /etc/hostname contains an invalid hostname\n";
+        return 1;
+    }
+    if (sethostname(hostname.c_str(), hostname.size()) != 0) {
+        std::cerr << "dinit-bootstrap: sethostname failed: " << std::strerror(errno) << '\n';
+        return 1;
+    }
+    std::cout << "dinit-bootstrap: hostname set to " << hostname << '\n';
+    return 0;
+}
+
+int run_sysctl_load()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: sysctl loading is skipped inside a container\n";
+        return 0;
+    }
+    const std::map<std::string, std::string> files = collect_config_files("sysctl.d");
+    unsigned int failures = 0;
+    for (std::map<std::string, std::string>::const_iterator file = files.begin();
+            file != files.end(); ++file) {
+        if (file->second.empty()) continue;
+        std::istringstream contents(read_file(file->second.c_str()));
+        std::string line;
+        while (std::getline(contents, line)) {
+            const std::string::size_type comment = line.find('#');
+            if (comment != std::string::npos) line.erase(comment);
+            const std::string::size_type separator = line.find('=');
+            if (separator == std::string::npos) continue;
+            std::string key = trim(line.substr(0, separator));
+            const std::string value = trim(line.substr(separator + 1));
+            if (key.empty() || value.empty()) continue;
+            if (key[0] == '-') key.erase(0, 1); // systemd-sysctl compatible ignore-errors prefix
+            bool valid = !key.empty() && key[0] != '.' && key[key.size() - 1] != '.';
+            for (std::string::size_type i = 0; valid && i < key.size(); ++i) {
+                const char ch = key[i];
+                if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.'))
+                    valid = false;
+                if (ch == '.' && i + 1 < key.size() && key[i + 1] == '.') valid = false;
+            }
+            if (!valid) {
+                std::cerr << "dinit-bootstrap: ignoring invalid sysctl key in "
+                          << file->second << '\n';
+                continue;
+            }
+            std::string path = "/proc/sys/";
+            for (std::string::size_type i = 0; i < key.size(); ++i)
+                path += key[i] == '.' ? '/' : key[i];
+            std::ofstream output(path.c_str());
+            if (!output || !(output << value << '\n')) {
+                ++failures;
+                std::cerr << "dinit-bootstrap: could not apply " << key
+                          << " from " << file->second << '\n';
+            }
+        }
+    }
+    std::cout << "dinit-bootstrap: sysctl configuration processed; "
+              << failures << " setting(s) failed\n";
+    return 0;
+}
+
+int run_machine_id()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: machine-id is supplied by the container runtime; leaving it unchanged\n";
+        return 0;
+    }
+
+    const char *machine_id_path = "/etc/machine-id";
+    struct stat st;
+    bool empty_existing_file = false;
+    if (lstat(machine_id_path, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            std::cout << "dinit-bootstrap: /etc/machine-id is not a regular file; leaving it unchanged\n";
+            return 0;
+        }
+        const std::string existing = trim(read_file(machine_id_path));
+        bool valid = existing.size() == 32;
+        bool nonzero = false;
+        for (std::string::size_type i = 0; valid && i < existing.size(); ++i) {
+            const char ch = existing[i];
+            const bool hex = (ch >= '0' && ch <= '9') ||
+                    (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+            if (!hex) valid = false;
+            if (ch != '0') nonzero = true;
+        }
+        if (valid && nonzero) {
+            std::cout << "dinit-bootstrap: existing machine-id is preserved\n";
+            return 0;
+        }
+        if (valid && !nonzero) {
+            empty_existing_file = true;
+        }
+        else if (st.st_size != 0) {
+            std::cerr << "dinit-bootstrap: existing /etc/machine-id is invalid; leaving it unchanged\n";
+            return 0;
+        }
+        empty_existing_file = true;
+    }
+    else if (errno != ENOENT) {
+        std::cerr << "dinit-bootstrap: cannot inspect /etc/machine-id: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+
+    unsigned char random_bytes[16];
+    int random_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (random_fd < 0) {
+        std::cerr << "dinit-bootstrap: cannot open /dev/urandom: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+    std::size_t received = 0;
+    while (received < sizeof(random_bytes)) {
+        const ssize_t count = read(random_fd, random_bytes + received,
+                sizeof(random_bytes) - received);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            const int error = count < 0 ? errno : EIO;
+            close(random_fd);
+            std::cerr << "dinit-bootstrap: cannot read machine-id entropy: "
+                      << std::strerror(error) << '\n';
+            return 1;
+        }
+        received += static_cast<std::size_t>(count);
+    }
+    close(random_fd);
+
+    static const char digits[] = "0123456789abcdef";
+    std::string machine_id;
+    for (unsigned int i = 0; i < sizeof(random_bytes); ++i) {
+        machine_id += digits[(random_bytes[i] >> 4) & 0x0f];
+        machine_id += digits[random_bytes[i] & 0x0f];
+    }
+    machine_id += '\n';
+
+    const int flags = O_WRONLY | O_CLOEXEC | O_NOFOLLOW |
+            (empty_existing_file ? O_TRUNC : (O_CREAT | O_EXCL));
+    const int output_fd = open(machine_id_path, flags, 0444);
+    if (output_fd < 0) {
+        if (errno == EEXIST) {
+            std::cout << "dinit-bootstrap: machine-id was created concurrently; leaving it unchanged\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: cannot create /etc/machine-id: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+
+    std::size_t written = 0;
+    while (written < machine_id.size()) {
+        const ssize_t count = write(output_fd, machine_id.data() + written,
+                machine_id.size() - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            const int error = count < 0 ? errno : EIO;
+            close(output_fd);
+            std::cerr << "dinit-bootstrap: cannot write /etc/machine-id: "
+                      << std::strerror(error) << '\n';
+            return 1;
+        }
+        written += static_cast<std::size_t>(count);
+    }
+    if (fchmod(output_fd, 0444) != 0 || fsync(output_fd) != 0) {
+        const int error = errno;
+        close(output_fd);
+        std::cerr << "dinit-bootstrap: cannot finalize /etc/machine-id: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    close(output_fd);
+    std::cout << "dinit-bootstrap: generated a new machine-id\n";
+    return 0;
+}
+
+int run_loopback_up()
+{
+    const int socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd < 0) {
+        if (load_environment_kind() == environment_kind::container) {
+            std::cout << "dinit-bootstrap: cannot inspect loopback in container; skipping\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: cannot open network control socket: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+
+    struct ifreq request;
+    std::memset(&request, 0, sizeof(request));
+    std::strncpy(request.ifr_name, "lo", IFNAMSIZ - 1);
+    if (ioctl(socket_fd, SIOCGIFFLAGS, &request) != 0) {
+        const int error = errno;
+        close(socket_fd);
+        if (load_environment_kind() == environment_kind::container) {
+            std::cout << "dinit-bootstrap: loopback interface is unavailable in container; skipping\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: cannot inspect loopback interface: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    if ((request.ifr_flags & IFF_UP) != 0) {
+        close(socket_fd);
+        std::cout << "dinit-bootstrap: loopback interface is already up\n";
+        return 0;
+    }
+    request.ifr_flags = static_cast<short>(request.ifr_flags | IFF_UP);
+    if (ioctl(socket_fd, SIOCSIFFLAGS, &request) != 0) {
+        const int error = errno;
+        close(socket_fd);
+        if (load_environment_kind() == environment_kind::container &&
+                (error == EPERM || error == EACCES)) {
+            std::cout << "dinit-bootstrap: container lacks permission to bring loopback up; skipping\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: cannot bring loopback interface up: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    close(socket_fd);
+    std::cout << "dinit-bootstrap: loopback interface is up\n";
+    return 0;
+}
+
+int run_hwclock()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: hardware clock setup is skipped inside a container\n";
+        return 0;
+    }
+    if (find_executable("hwclock").empty()) {
+        std::cout << "dinit-bootstrap: hwclock is not installed; skipping hardware clock setup\n";
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.push_back("hwclock");
+    args.push_back("-s");
+    const int result = execute_program(args, true);
+    if (result != 0) {
+        std::cerr << "dinit-bootstrap: hardware clock could not set system time (status "
+                  << result << "); continuing\n";
+    }
+    return 0;
 }
 
 int run_detect(bool stay)
@@ -904,9 +1216,15 @@ int main(int argc, char **argv)
     if (argc >= 2 && std::strcmp(argv[1], "mount-local") == 0) return run_mount_local();
     if (argc >= 2 && std::strcmp(argv[1], "root-rw") == 0) return run_root_rw();
     if (argc >= 2 && std::strcmp(argv[1], "swap-on") == 0) return run_swap_on();
+    if (argc >= 2 && std::strcmp(argv[1], "modules-load") == 0) return run_modules_load();
+    if (argc >= 2 && std::strcmp(argv[1], "set-hostname") == 0) return run_set_hostname();
+    if (argc >= 2 && std::strcmp(argv[1], "sysctl-load") == 0) return run_sysctl_load();
+    if (argc >= 2 && std::strcmp(argv[1], "loopback-up") == 0) return run_loopback_up();
+    if (argc >= 2 && std::strcmp(argv[1], "hwclock") == 0) return run_hwclock();
+    if (argc >= 2 && std::strcmp(argv[1], "machine-id") == 0) return run_machine_id();
     if (argc < 2 || std::strcmp(argv[1], "detect") != 0) {
         std::cerr << "Usage: dinit-bootstrap detect [--stay] | mount-pseudo proc|sys"
-                     " | mount-dev | mount-devpts | mount-shm | fsck-root | fsck-local | mount-local | root-rw | swap-on\n";
+                     " | mount-dev | mount-devpts | mount-shm | modules-load | set-hostname | sysctl-load | loopback-up | hwclock | machine-id | fsck-root | fsck-local | mount-local | root-rw | swap-on\n";
         return 2;
     }
     return run_detect(argc > 2 && std::strcmp(argv[2], "--stay") == 0);
