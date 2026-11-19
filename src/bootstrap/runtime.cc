@@ -178,16 +178,16 @@ int run_detect(bool stay)
     sigaddset(&signals, SIGINT);
     sigaddset(&signals, SIGHUP);
     if (sigprocmask(SIG_BLOCK, &signals, nullptr) != 0) {
-        std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\\n';
+        std::cerr << "dinit-bootstrap: sigprocmask: " << std::strerror(errno) << '\n';
         return 1;
     }
 
     // Dinit's ready-notification pipe prevents dependent services from racing
     // the environment-state write above.
-    const char ready_message[] = "READY\\n";
+    const char ready_message[] = "READY\n";
     if (write(4, ready_message, sizeof(ready_message) - 1)
             != static_cast<ssize_t>(sizeof(ready_message) - 1)) {
-        std::cerr << "dinit-bootstrap: failed to notify Dinit that detection is ready\\n";
+        std::cerr << "dinit-bootstrap: failed to notify Dinit that detection is ready\n";
         return 1;
     }
 
