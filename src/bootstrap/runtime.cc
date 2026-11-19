@@ -26,6 +26,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -729,7 +730,10 @@ int run_local_fsck()
     }
     std::vector<std::string> args;
     args.push_back("fsck"); args.push_back("-A"); args.push_back("-R");
-    args.push_back("-C"); args.push_back("-t"); args.push_back("noopts=_netdev");
+    // BusyBox fsck requires an explicit descriptor after -C, while util-linux
+    // treats it as optional. Progress reporting is cosmetic, so omit -C for
+    // consistent behavior across both implementations.
+    args.push_back("-t"); args.push_back("noopts=_netdev");
     if (options.force) args.push_back("-f");
     args.push_back(options.repair);
     const int result = execute_program(args, false);
@@ -962,14 +966,51 @@ int run_machine_id()
     }
 
     const char *machine_id_path = "/etc/machine-id";
-    struct stat st;
-    bool empty_existing_file = false;
-    if (lstat(machine_id_path, &st) == 0) {
-        if (!S_ISREG(st.st_mode)) {
+    struct stat original_stat;
+    bool replace_existing = false;
+    int existing_fd = open(machine_id_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (existing_fd >= 0) {
+        if (fstat(existing_fd, &original_stat) != 0) {
+            const int error = errno;
+            close(existing_fd);
+            std::cerr << "dinit-bootstrap: cannot inspect /etc/machine-id: "
+                      << std::strerror(error) << '\n';
+            return 1;
+        }
+        if (!S_ISREG(original_stat.st_mode)) {
+            close(existing_fd);
             std::cout << "dinit-bootstrap: /etc/machine-id is not a regular file; leaving it unchanged\n";
             return 0;
         }
-        const std::string existing = trim(read_file(machine_id_path));
+
+        char existing_buffer[129];
+        std::size_t existing_size = 0;
+        bool read_failed = false;
+        while (existing_size < sizeof(existing_buffer)) {
+            const ssize_t count = read(existing_fd, existing_buffer + existing_size,
+                    sizeof(existing_buffer) - existing_size);
+            if (count < 0 && errno == EINTR) continue;
+            if (count < 0) {
+                read_failed = true;
+                break;
+            }
+            if (count == 0) break;
+            existing_size += static_cast<std::size_t>(count);
+        }
+        const int read_error = errno;
+        close(existing_fd);
+        if (read_failed) {
+            std::cerr << "dinit-bootstrap: cannot read /etc/machine-id: "
+                      << std::strerror(read_error) << '\n';
+            return 1;
+        }
+        if (existing_size == sizeof(existing_buffer)) {
+            std::cerr << "dinit-bootstrap: existing /etc/machine-id is invalid; leaving it unchanged\n";
+            return 0;
+        }
+
+        const std::string existing = trim(
+                std::string(existing_buffer, existing_size));
         bool valid = existing.size() == 32;
         bool nonzero = false;
         for (std::string::size_type i = 0; valid && i < existing.size(); ++i) {
@@ -983,43 +1024,51 @@ int run_machine_id()
             std::cout << "dinit-bootstrap: existing machine-id is preserved\n";
             return 0;
         }
-        if (valid && !nonzero) {
-            empty_existing_file = true;
+        if ((valid && !nonzero) ||
+                (existing.empty() && original_stat.st_size == 0)) {
+            replace_existing = true;
         }
-        else if (st.st_size != 0) {
+        else {
             std::cerr << "dinit-bootstrap: existing /etc/machine-id is invalid; leaving it unchanged\n";
             return 0;
         }
-        empty_existing_file = true;
     }
     else if (errno != ENOENT) {
-        std::cerr << "dinit-bootstrap: cannot inspect /etc/machine-id: "
-                  << std::strerror(errno) << '\n';
+        const int error = errno;
+        if (error == ELOOP) {
+            std::cout << "dinit-bootstrap: /etc/machine-id is a symbolic link; leaving it unchanged\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: cannot open /etc/machine-id: "
+                  << std::strerror(error) << '\n';
         return 1;
     }
 
+    // Linux 4.9 (the minimum supported kernel) has getrandom(2). Calling the
+    // syscall directly avoids requiring a newer libc wrapper, and blocking
+    // mode prevents generating an ID from an uninitialized early-boot pool.
     unsigned char random_bytes[16];
-    int random_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (random_fd < 0) {
-        std::cerr << "dinit-bootstrap: cannot open /dev/urandom: "
-                  << std::strerror(errno) << '\n';
-        return 1;
-    }
+#ifndef SYS_getrandom
+    std::cerr << "dinit-bootstrap: getrandom syscall number is unavailable on this architecture\n";
+    return 1;
+#else
     std::size_t received = 0;
     while (received < sizeof(random_bytes)) {
-        const ssize_t count = read(random_fd, random_bytes + received,
-                sizeof(random_bytes) - received);
+        const long count = syscall(SYS_getrandom, random_bytes + received,
+                sizeof(random_bytes) - received, 0);
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) {
-            const int error = count < 0 ? errno : EIO;
-            close(random_fd);
-            std::cerr << "dinit-bootstrap: cannot read machine-id entropy: "
-                      << std::strerror(error) << '\n';
+        if (count < 0) {
+            std::cerr << "dinit-bootstrap: getrandom failed: "
+                      << std::strerror(errno) << '\n';
+            return 1;
+        }
+        if (count == 0) {
+            std::cerr << "dinit-bootstrap: getrandom returned no data\n";
             return 1;
         }
         received += static_cast<std::size_t>(count);
     }
-    close(random_fd);
+#endif
 
     static const char digits[] = "0123456789abcdef";
     std::string machine_id;
@@ -1029,41 +1078,132 @@ int run_machine_id()
     }
     machine_id += '\n';
 
-    const int flags = O_WRONLY | O_CLOEXEC | O_NOFOLLOW |
-            (empty_existing_file ? O_TRUNC : (O_CREAT | O_EXCL));
-    const int output_fd = open(machine_id_path, flags, 0444);
-    if (output_fd < 0) {
-        if (errno == EEXIST) {
-            std::cout << "dinit-bootstrap: machine-id was created concurrently; leaving it unchanged\n";
-            return 0;
-        }
-        std::cerr << "dinit-bootstrap: cannot create /etc/machine-id: "
+    // Prepare and sync a complete replacement before making it visible.
+    std::string temporary_path = "/etc/.machine-id.XXXXXX";
+    int temporary_fd = mkstemp(&temporary_path[0]);
+    if (temporary_fd < 0) {
+        std::cerr << "dinit-bootstrap: cannot create temporary machine-id: "
                   << std::strerror(errno) << '\n';
+        return 1;
+    }
+    bool temporary_exists = true;
+    const auto cleanup_temporary = [&]() {
+        if (temporary_fd >= 0) close(temporary_fd);
+        if (temporary_exists) unlink(temporary_path.c_str());
+    };
+
+    if (fcntl(temporary_fd, F_SETFD, FD_CLOEXEC) != 0 ||
+            fchmod(temporary_fd, 0444) != 0) {
+        const int error = errno;
+        cleanup_temporary();
+        std::cerr << "dinit-bootstrap: cannot prepare temporary machine-id: "
+                  << std::strerror(error) << '\n';
         return 1;
     }
 
     std::size_t written = 0;
     while (written < machine_id.size()) {
-        const ssize_t count = write(output_fd, machine_id.data() + written,
+        const ssize_t count = write(temporary_fd, machine_id.data() + written,
                 machine_id.size() - written);
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) {
             const int error = count < 0 ? errno : EIO;
-            close(output_fd);
-            std::cerr << "dinit-bootstrap: cannot write /etc/machine-id: "
+            cleanup_temporary();
+            std::cerr << "dinit-bootstrap: cannot write temporary machine-id: "
                       << std::strerror(error) << '\n';
             return 1;
         }
         written += static_cast<std::size_t>(count);
     }
-    if (fchmod(output_fd, 0444) != 0 || fsync(output_fd) != 0) {
+    if (fsync(temporary_fd) != 0) {
         const int error = errno;
-        close(output_fd);
-        std::cerr << "dinit-bootstrap: cannot finalize /etc/machine-id: "
+        cleanup_temporary();
+        std::cerr << "dinit-bootstrap: cannot sync temporary machine-id: "
                   << std::strerror(error) << '\n';
         return 1;
     }
-    close(output_fd);
+    if (close(temporary_fd) != 0) {
+        const int error = errno;
+        temporary_fd = -1;
+        unlink(temporary_path.c_str());
+        std::cerr << "dinit-bootstrap: cannot close temporary machine-id: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    temporary_fd = -1;
+
+    const int directory_fd = open("/etc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory_fd < 0) {
+        const int error = errno;
+        unlink(temporary_path.c_str());
+        std::cerr << "dinit-bootstrap: cannot open /etc for syncing: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+
+    if (replace_existing) {
+        struct stat current_stat;
+        if (lstat(machine_id_path, &current_stat) != 0 ||
+                !S_ISREG(current_stat.st_mode) ||
+                current_stat.st_dev != original_stat.st_dev ||
+                current_stat.st_ino != original_stat.st_ino) {
+            close(directory_fd);
+            unlink(temporary_path.c_str());
+            std::cout << "dinit-bootstrap: machine-id changed concurrently; leaving it unchanged\n";
+            return 0;
+        }
+        if (std::rename(temporary_path.c_str(), machine_id_path) != 0) {
+            const int error = errno;
+            close(directory_fd);
+            unlink(temporary_path.c_str());
+            std::cerr << "dinit-bootstrap: cannot atomically replace machine-id: "
+                      << std::strerror(error) << '\n';
+            return 1;
+        }
+        temporary_exists = false;
+    }
+    else {
+        // link() provides atomic create-if-absent semantics; unlike rename(),
+        // it cannot overwrite a file created by an administrator concurrently.
+        if (link(temporary_path.c_str(), machine_id_path) != 0) {
+            const int error = errno;
+            close(directory_fd);
+            unlink(temporary_path.c_str());
+            if (error == EEXIST) {
+                std::cout << "dinit-bootstrap: machine-id was created concurrently; leaving it unchanged\n";
+                return 0;
+            }
+            std::cerr << "dinit-bootstrap: cannot install machine-id: "
+                      << std::strerror(error) << '\n';
+            return 1;
+        }
+        if (unlink(temporary_path.c_str()) != 0) {
+            // The final link already exists. Still sync the directory before
+            // reporting the leftover temporary name.
+            const int error = errno;
+            if (fsync(directory_fd) != 0) {
+                const int sync_error = errno;
+                close(directory_fd);
+                std::cerr << "dinit-bootstrap: machine-id was installed but /etc could not be synced: "
+                          << std::strerror(sync_error) << '\n';
+                return 1;
+            }
+            close(directory_fd);
+            std::cerr << "dinit-bootstrap: machine-id was installed but temporary link cleanup failed: "
+                      << std::strerror(error) << '\n';
+            return 1;
+        }
+        temporary_exists = false;
+    }
+
+    if (fsync(directory_fd) != 0) {
+        const int error = errno;
+        close(directory_fd);
+        std::cerr << "dinit-bootstrap: machine-id was installed but /etc could not be synced: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    close(directory_fd);
     std::cout << "dinit-bootstrap: generated a new machine-id\n";
     return 0;
 }
