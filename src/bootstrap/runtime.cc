@@ -134,7 +134,7 @@ mount_info detect_mounts()
         else if (mountpoint == "/dev") info.devfs = filesystem;
 
         if (mountpoint == "/sys/fs/cgroup"
-                || mountpoint.compare(0, 16, "/sys/fs/cgroup/") == 0) {
+                || mountpoint.compare(0, 15, "/sys/fs/cgroup/") == 0) {
             if (filesystem == "cgroup") info.cgroup_v1 = true;
             else if (filesystem == "cgroup2") info.cgroup_v2 = true;
         }
@@ -143,12 +143,6 @@ mount_info detect_mounts()
     return info;
 }
 
-const char *mount_status(const mount_info &info, const std::string &filesystem,
-        const char *expected)
-{
-    if (!info.available) return "unknown";
-    return filesystem == expected ? "yes" : "no";
-}
 
 environment_info detect_environment()
 {
@@ -234,7 +228,13 @@ bool write_state(const environment_info &info)
            << "pid1=" << (info.pid1 ? "yes" : "no") << '\n'
            << "nested-pid-namespace=" << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
            << "container=" << (info.container_name.empty() ? "none" : info.container_name) << '\n'
-           << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n';
+           << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n'
+           << "mountinfo=" << (info.mountinfo_available ? "available" : "unavailable") << '\n'
+           << "root-fs=" << (info.root_fs_type.empty() ? "unknown" : info.root_fs_type) << '\n'
+           << "procfs=" << (info.mountinfo_available ? (info.procfs == "proc" ? "yes" : "no") : "unknown") << '\n'
+           << "sysfs=" << (info.mountinfo_available ? (info.sysfs == "sysfs" ? "yes" : "no") : "unknown") << '\n'
+           << "devfs=" << (info.devfs.empty() ? (info.mountinfo_available ? "no" : "unknown") : info.devfs) << '\n'
+           << "cgroups=" << info.cgroups << '\n';
     return output.good();
 }
 
