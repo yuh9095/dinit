@@ -177,6 +177,10 @@ jobs:
       run: ./configure --enable-bootstrap
     - name: Build Dinit and Linux Bootstrap
       run: make -j2
+    - name: Prepare Bootstrap helper for service graph validation
+      run: |
+        mkdir -p /usr/lib/dinit
+        install -m 0755 src/dinit-bootstrap /usr/lib/dinit/dinit-bootstrap
     - name: Check generated Dinit service graph
       run: |
         mkdir -p /etc/dinit.d/boot.d /etc/dinit.d/early-fs-pre.d
