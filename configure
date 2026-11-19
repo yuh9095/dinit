@@ -347,6 +347,10 @@ Build and configuration options:
   --enable-oom-adj                  Enable support for Linux "OOM" score adjustment
                                     [Enabled only on Linux] 
   --disable-oom-adj                 Disable support for Linux "OOM" score adjustment
+  --enable-bootstrap                  Build the Linux Bootstrap dinit.d package [Enabled on Linux]
+  --disable-bootstrap                 Don't build or install the Linux Bootstrap package
+  --with-bootstrap-libdir=DIR         Bootstrap C++ helper directory [EPREFIX/lib/dinit]
+  --with-bootstrap-servicedir=DIR     Bootstrap Dinit service directory [EPREFIX/lib/dinit.d]
   --enable-utmpx                    Enable manipulating the utmp/utmpx database via the related
                                     POSIX functions [Depends on system]
   --disable-utmpx                   Disable manipulating the utmp/utmpx database via the related
