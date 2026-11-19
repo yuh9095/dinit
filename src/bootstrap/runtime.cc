@@ -184,11 +184,11 @@ environment_info detect_environment()
         // runtime (Docker/LXC/etc.) cannot be identified.
         info.kind = environment_kind::container;
     }
-    else if (!info.pid_namespace_depth_known) {
-        info.kind = environment_kind::unknown;
-    }
     else if (!info.virtualization.empty()) {
         info.kind = environment_kind::virtual_machine;
+    }
+    else if (!info.pid_namespace_depth_known) {
+        info.kind = environment_kind::unknown;
     }
     else if (info.pid1) {
         info.kind = environment_kind::bare_metal;
@@ -275,20 +275,17 @@ int ensure_pseudo_filesystem(const char *name)
             ? current.procfs : current.sysfs;
     const char *mountpoint = std::strcmp(name, "proc") == 0 ? "/proc" : "/sys";
 
-    if (!current.available) {
-        if (kind != environment_kind::container) {
-            return mount_failure(kind, name, "cannot inspect /proc/self/mountinfo", container_may_skip);
-        }
-    }
-    else if (!mounted.empty()) {
+    if (current.available && !mounted.empty()) {
         if (mounted == name) {
             std::cout << "dinit-bootstrap: " << mountpoint
                       << " already mounted as " << name << '\n';
             return 0;
         }
         return mount_failure(kind, name,
-                "mountpoint is already occupied by a different filesystem");
+                "mountpoint is already occupied by a different filesystem", container_may_skip);
     }
+    // If mountinfo is unavailable (for example because procfs is not mounted
+    // yet), attempt the mount rather than making inspection itself fatal.
 
     const unsigned long flags = MS_NOSUID | MS_NODEV | MS_NOEXEC;
     if (mount(name, mountpoint, name, flags, nullptr) == 0) {
