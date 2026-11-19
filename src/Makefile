@@ -14,8 +14,7 @@ dinit_objects = dinit.o load-service.o service.o proc-service.o baseproc-service
 
 objects = $(dinit_objects) dinitctl.o dinit-check.o shutdown.o dinit-monitor.o dinit-client.o
 
-all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)
-
+all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)\n\nifeq ($(ENABLE_BOOTSTRAP),yes)\nall: bootstrap\nendif\n
 ../mconfig:
 	@echo "*** No mconfig, please run make from top level"
 	@false
@@ -35,8 +34,7 @@ dinit-monitor: dinit-monitor.o
 $(SHUTDOWN_PREFIX)shutdown: shutdown.o
 	$(CXX) -o $(SHUTDOWN_PREFIX)shutdown shutdown.o $(ALL_LDFLAGS)
 
-$(objects): ../build/includes/mconfig.h
-
+$(objects): ../build/includes/mconfig.h\n\nifeq ($(ENABLE_BOOTSTRAP),yes)\nCXX_FOR_BUILD ?= $(CXX)\nCXXFLAGS_FOR_BUILD ?= $(CXXFLAGS)\nCPPFLAGS_FOR_BUILD ?= $(CPPFLAGS)\nLDFLAGS_FOR_BUILD ?= $(LDFLAGS)\n\nbootstrap: dinit-bootstrap bootstrap-generated\n\ndinit-bootstrap: bootstrap/runtime.cc\n\t$(CXX) $(ALL_CXXFLAGS) -std=c++11 -o $@ $< $(ALL_LDFLAGS)\n\ndinit-bootstrap-gen: bootstrap/generate.cc\n\t$(CXX_FOR_BUILD) $(CPPFLAGS_FOR_BUILD) $(CXXFLAGS_FOR_BUILD) -std=c++11 -o $@ $< $(LDFLAGS_FOR_BUILD)\n\nbootstrap-generated: dinit-bootstrap-gen\n\trm -rf bootstrap-generated\n\t./dinit-bootstrap-gen bootstrap-generated $(BOOTSTRAP_LIBDIR)/dinit-bootstrap\nendif\n
 $(objects): %.o: %.cc
 	$(CXX) $(ALL_CXXFLAGS) $(CPPFLAGS_LIBCAP) -MMD -MP -Iincludes -I../dasynq/include -I../build/includes -c $< -o $@
 
