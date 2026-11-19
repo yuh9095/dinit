@@ -84,9 +84,11 @@ ifeq ($(BUILD_SHUTDOWN),yes)
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)poweroff
 endif
 ifeq ($(ENABLE_BOOTSTRAP),yes)
-	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)
+	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-fs-pre.d
 	install $(STRIPOPTS) dinit-bootstrap $(DESTDIR)$(BOOTSTRAP_LIBDIR)/dinit-bootstrap
-	install -m 0644 bootstrap-generated/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
+	install -m 0644 bootstrap-generated/early/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
+	install -m 0644 bootstrap-generated/generic/*.target $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/
+	install -m 0644 bootstrap-generated/generic/boot.d/* $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d/
 endif
 
 clean:

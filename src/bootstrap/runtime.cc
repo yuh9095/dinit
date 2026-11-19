@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <mntent.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -14,7 +16,9 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>
@@ -404,6 +408,235 @@ int ensure_pseudo_filesystem(const char *name)
     return 1;
 }
 
+bool executable_in_path(const std::string &name)
+{
+    if (name.find('/') != std::string::npos) return access(name.c_str(), X_OK) == 0;
+    const char *path = std::getenv("PATH");
+    if (path == nullptr || *path == '\0') path = "/usr/sbin:/usr/bin:/sbin:/bin";
+    std::istringstream paths(path);
+    std::string directory;
+    while (std::getline(paths, directory, ':')) {
+        if (directory.empty()) directory = ".";
+        if (access((directory + "/" + name).c_str(), X_OK) == 0) return true;
+    }
+    return false;
+}
+
+int execute_program(const std::vector<std::string> &arguments, bool optional)
+{
+    if (arguments.empty()) return 2;
+    int error_pipe[2];
+    if (pipe(error_pipe) != 0) {
+        std::cerr << "dinit-bootstrap: pipe: " << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (fcntl(error_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        std::cerr << "dinit-bootstrap: fcntl: " << std::strerror(errno) << '\n';
+        close(error_pipe[0]); close(error_pipe[1]); return 1;
+    }
+    const pid_t child = fork();
+    if (child < 0) {
+        std::cerr << "dinit-bootstrap: fork: " << std::strerror(errno) << '\n';
+        close(error_pipe[0]); close(error_pipe[1]); return 1;
+    }
+    if (child == 0) {
+        close(error_pipe[0]);
+        std::vector<char *> argv;
+        for (std::size_t i = 0; i < arguments.size(); ++i)
+            argv.push_back(const_cast<char *>(arguments[i].c_str()));
+        argv.push_back(nullptr);
+        execvp(argv[0], &argv[0]);
+        const int exec_error = errno;
+        (void) write(error_pipe[1], &exec_error, sizeof(exec_error));
+        _exit(127);
+    }
+    close(error_pipe[1]);
+    int exec_error = 0;
+    ssize_t received;
+    do { received = read(error_pipe[0], &exec_error, sizeof(exec_error)); }
+    while (received < 0 && errno == EINTR);
+    close(error_pipe[0]);
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+        std::cerr << "dinit-bootstrap: waitpid: " << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (received > 0) {
+        if (optional && exec_error == ENOENT) {
+            std::cout << "dinit-bootstrap: optional tool " << arguments[0]
+                      << " is not installed; skipping\n";
+            return 0;
+        }
+        std::cerr << "dinit-bootstrap: cannot execute " << arguments[0]
+                  << ": " << std::strerror(exec_error) << '\n';
+        return 1;
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 1;
+}
+
+struct fsck_options {
+    bool skip;
+    bool force;
+    std::string repair;
+    fsck_options() : skip(false), force(false), repair("-a") {}
+};
+
+fsck_options read_fsck_options()
+{
+    fsck_options options;
+    std::istringstream cmdline(read_file("/proc/cmdline"));
+    std::string item;
+    while (cmdline >> item) {
+        if (item == "fastboot" || item == "fsck.mode=skip") options.skip = true;
+        else if (item == "forcefsck" || item == "fsck.mode=force") options.force = true;
+        else if (item == "fsckfix" || item == "fsck.repair=yes") options.repair = "-y";
+        else if (item == "fsck.repair=no") options.repair = "-n";
+    }
+    return options;
+}
+
+int run_root_fsck()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
+        return 0;
+    }
+    const fsck_options options = read_fsck_options();
+    if (options.skip) return 0;
+    if (!executable_in_path("fsck")) {
+        std::cout << "dinit-bootstrap: fsck is not installed; skipping root check\n";
+        return 0;
+    }
+    FILE *fstab = setmntent("/etc/fstab", "r");
+    if (fstab != nullptr) {
+        struct mntent *entry;
+        while ((entry = getmntent(fstab)) != nullptr) {
+            if (std::strcmp(entry->mnt_dir, "/") == 0 && entry->mnt_passno == 0) {
+                endmntent(fstab);
+                std::cout << "dinit-bootstrap: root check disabled by fstab pass number\n";
+                return 0;
+            }
+        }
+        endmntent(fstab);
+    }
+    FILE *mounts = setmntent("/proc/self/mounts", "r");
+    if (mounts == nullptr) {
+        std::cerr << "dinit-bootstrap: cannot read /proc/self/mounts for root fsck\n";
+        return 1;
+    }
+    std::string device, filesystem;
+    struct mntent *entry;
+    while ((entry = getmntent(mounts)) != nullptr) {
+        if (std::strcmp(entry->mnt_dir, "/") == 0) {
+            device = entry->mnt_fsname; filesystem = entry->mnt_type; break;
+        }
+    }
+    endmntent(mounts);
+    struct stat device_stat;
+    if (device.empty() || stat(device.c_str(), &device_stat) != 0 ||
+            !S_ISBLK(device_stat.st_mode)) {
+        std::cout << "dinit-bootstrap: root is not a checkable block device; skipping root fsck\n";
+        return 0;
+    }
+    if (filesystem.empty() || !executable_in_path("fsck." + filesystem)) {
+        std::cout << "dinit-bootstrap: no fsck helper for root filesystem "
+                  << filesystem << "; skipping\n";
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.push_back("fsck"); args.push_back("-C");
+    if (options.force) args.push_back("-f");
+    args.push_back(options.repair); args.push_back("-t");
+    args.push_back(filesystem); args.push_back(device);
+    std::cout << "dinit-bootstrap: checking root filesystem " << device << '\n';
+    const int result = execute_program(args, false);
+    if (result == 0 || result == 1) return 0;
+    std::cerr << "dinit-bootstrap: root fsck requires intervention or reboot (status "
+              << result << ")\n";
+    return 1;
+}
+
+int run_local_fsck()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: local fsck is skipped inside a container\n";
+        return 0;
+    }
+    const fsck_options options = read_fsck_options();
+    if (options.skip) return 0;
+    if (!executable_in_path("fsck")) {
+        std::cout << "dinit-bootstrap: fsck is not installed; skipping local checks\n";
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.push_back("fsck"); args.push_back("-A"); args.push_back("-R");
+    args.push_back("-C"); args.push_back("-t"); args.push_back("noopts=_netdev");
+    if (options.force) args.push_back("-f");
+    args.push_back(options.repair);
+    const int result = execute_program(args, false);
+    if (result == 0 || result == 1) return 0;
+    std::cerr << "dinit-bootstrap: local fsck failed (status " << result << ")\n";
+    return 1;
+}
+
+int run_mount_local()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: fstab mounting is skipped inside a container\n";
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.push_back("mount"); args.push_back("-a"); args.push_back("-t");
+    args.push_back("nosysfs,nonfs,nonfs4,nosmbfs,nocifs");
+    args.push_back("-O"); args.push_back("no_netdev");
+    return execute_program(args, false);
+}
+
+int run_root_rw()
+{
+    FILE *mounts = setmntent("/proc/self/mounts", "r");
+    if (mounts == nullptr) {
+        std::cerr << "dinit-bootstrap: cannot inspect root mount options\n";
+        return 1;
+    }
+    bool root_is_rw = false;
+    struct mntent *entry;
+    while ((entry = getmntent(mounts)) != nullptr) {
+        if (std::strcmp(entry->mnt_dir, "/") == 0) {
+            root_is_rw = hasmntopt(entry, "rw") != nullptr; break;
+        }
+    }
+    endmntent(mounts);
+    if (root_is_rw) {
+        std::cout << "dinit-bootstrap: root filesystem is already read-write\n";
+        return 0;
+    }
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: read-only container root is left unchanged\n";
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.push_back("mount"); args.push_back("-o");
+    args.push_back("remount,rw"); args.push_back("/");
+    return execute_program(args, false);
+}
+
+int run_swap_on()
+{
+    if (load_environment_kind() == environment_kind::container) {
+        std::cout << "dinit-bootstrap: swap activation is skipped inside a container\n";
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.push_back("swapon"); args.push_back("-a");
+    return execute_program(args, true);
+}
+
 int run_detect(bool stay)
 {
     sigset_t signals;
@@ -473,8 +706,14 @@ int main(int argc, char **argv)
         std::cerr << "dinit-bootstrap: unknown pseudo filesystem: " << argv[2] << '\n';
         return 2;
     }
+    if (argc >= 2 && std::strcmp(argv[1], "fsck-root") == 0) return run_root_fsck();
+    if (argc >= 2 && std::strcmp(argv[1], "fsck-local") == 0) return run_local_fsck();
+    if (argc >= 2 && std::strcmp(argv[1], "mount-local") == 0) return run_mount_local();
+    if (argc >= 2 && std::strcmp(argv[1], "root-rw") == 0) return run_root_rw();
+    if (argc >= 2 && std::strcmp(argv[1], "swap-on") == 0) return run_swap_on();
     if (argc < 2 || std::strcmp(argv[1], "detect") != 0) {
-        std::cerr << "Usage: dinit-bootstrap detect [--stay] | mount-pseudo proc|sys\n";
+        std::cerr << "Usage: dinit-bootstrap detect [--stay] | mount-pseudo proc|sys"
+                     " | fsck-root | fsck-local | mount-local | root-rw | swap-on\n";
         return 2;
     }
     return run_detect(argc > 2 && std::strcmp(argv[2], "--stay") == 0);
