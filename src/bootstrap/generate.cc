@@ -48,12 +48,13 @@ bool write_service(const std::string &directory, const std::string &name,
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        std::cerr << "Usage: dinit-bootstrap-gen OUTPUT_DIR HELPER_PATH\n";
+    if (argc != 4) {
+        std::cerr << "Usage: dinit-bootstrap-gen OUTPUT_DIR HELPER_PATH GENERIC_SERVICE_DIR\n";
         return 2;
     }
     const std::string output_dir(argv[1]);
     const std::string helper_path(argv[2]);
+    const std::string generic_service_dir(argv[3]);
     const std::string early_dir = output_dir + "/early";
     const std::string generic_dir = output_dir + "/generic";
     const std::string boot_dir = generic_dir + "/boot.d";
@@ -83,7 +84,7 @@ int main(int argc, char **argv)
         "depends-ms: early-root-fsck\n";
     const std::string fs_pre =
         "type = internal\ndepends-on: early-prepare.target\n"
-        "waits-for.d: /etc/dinit.d/early-fs-pre.d\n";
+        "waits-for.d: " + generic_service_dir + "/early-fs-pre.d\n";
     const std::string fsck_local =
         "type = scripted\ncommand = " + helper_path + " fsck-local\nrestart = false\n"
         "depends-on: early-fs-pre.target\n";

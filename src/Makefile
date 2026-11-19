@@ -36,7 +36,7 @@ dinit-bootstrap-gen: bootstrap/generate.cc
 
 bootstrap-generated: dinit-bootstrap-gen
 	rm -rf bootstrap-generated
-	./dinit-bootstrap-gen bootstrap-generated $(BOOTSTRAP_LIBDIR)/dinit-bootstrap
+	./dinit-bootstrap-gen bootstrap-generated $(BOOTSTRAP_LIBDIR)/dinit-bootstrap $(BOOTSTRAP_GENERIC_SERVICEDIR)
 endif
 
 ../mconfig:
