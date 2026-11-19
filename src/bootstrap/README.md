@@ -22,7 +22,7 @@ references.
 * Linux 4.9 is the minimum compatibility target. Newer kernel interfaces
   are optional and must be detected at runtime.
 
-The runtime detector writes its result to /run/dinit/environment.
+The runtime detector writes its result to /run/dinit/environment. The state records PID 1 and PID namespace information, container/VM classification, the root filesystem type, procfs/sysfs mount status, the /dev filesystem type, and cgroup v1/v2/hybrid mount presence. Unknown detection results remain explicitly unknown; they are not silently treated as host defaults.
 The service remains supervised after detection so that Dinit can treat the
 environment service as active until the rest of the boot sequence is stopped.
 
