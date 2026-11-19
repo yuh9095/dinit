@@ -107,6 +107,8 @@ environment_info detect_environment()
     }
 
     info.container_name = detect_container();
+    if (info.container_name.empty() && info.nested_pid_namespace)
+        info.container_name = "pid-namespace";
     info.virtualization = detect_virtual_machine();
     if (!info.container_name.empty()) info.kind = environment_kind::container;
     else if (!info.virtualization.empty()) info.kind = environment_kind::virtual_machine;
