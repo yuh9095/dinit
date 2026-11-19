@@ -256,11 +256,11 @@ int mount_failure(environment_kind kind, const char *filesystem,
 {
     if (kind == environment_kind::container) {
         std::cerr << "dinit-bootstrap: skipping " << filesystem
-                  << " setup in container: " << reason << '\\n';
+                  << " setup in container: " << reason << '\n';
         return 0;
     }
     std::cerr << "dinit-bootstrap: required " << filesystem
-              << " setup failed: " << reason << '\\n';
+              << " setup failed: " << reason << '\n';
     return 1;
 }
 
@@ -280,7 +280,7 @@ int ensure_pseudo_filesystem(const char *name)
     else if (!mounted.empty()) {
         if (mounted == name) {
             std::cout << "dinit-bootstrap: " << mountpoint
-                      << " already mounted as " << name << '\\n';
+                      << " already mounted as " << name << '\n';
             return 0;
         }
         return mount_failure(kind, name,
@@ -290,7 +290,7 @@ int ensure_pseudo_filesystem(const char *name)
     const unsigned long flags = MS_NOSUID | MS_NODEV | MS_NOEXEC;
     if (mount(name, mountpoint, name, flags, nullptr) == 0) {
         std::cout << "dinit-bootstrap: mounted " << name
-                  << " on " << mountpoint << '\\n';
+                  << " on " << mountpoint << '\n';
         return 0;
     }
 
@@ -345,7 +345,12 @@ int run_detect(bool stay)
     }
 
     int signal_number = 0;
-    while (sigwait(&signals, &signal_number) == EINTR) {}
+    const int wait_result = sigwait(&signals, &signal_number);
+    if (wait_result != 0) {
+        std::cerr << "dinit-bootstrap: sigwait: "
+                  << std::strerror(wait_result) << '\n';
+        return 1;
+    }
     return 0;
 }
 
@@ -353,8 +358,14 @@ int run_detect(bool stay)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 3 && std::strcmp(argv[1], "mount-pseudo") == 0) {
+        if (std::strcmp(argv[2], "proc") == 0 || std::strcmp(argv[2], "sys") == 0)
+            return ensure_pseudo_filesystem(argv[2]);
+        std::cerr << "dinit-bootstrap: unknown pseudo filesystem: " << argv[2] << '\n';
+        return 2;
+    }
     if (argc < 2 || std::strcmp(argv[1], "detect") != 0) {
-        std::cerr << "Usage: dinit-bootstrap detect [--stay]\n";
+        std::cerr << "Usage: dinit-bootstrap detect [--stay] | mount-pseudo proc|sys\n";
         return 2;
     }
     return run_detect(argc > 2 && std::strcmp(argv[2], "--stay") == 0);
