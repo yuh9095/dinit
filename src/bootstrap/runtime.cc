@@ -712,20 +712,52 @@ fsck_options read_fsck_options()
     return options;
 }
 
-bool root_fsck_requested()
+struct root_fstab_info {
+    bool present;
+    bool found_root;
+    bool readonly;
+    bool fsck_requested;
+};
+
+bool read_root_fstab_info(root_fstab_info &info)
 {
+    info.present = false;
+    info.found_root = false;
+    info.readonly = true;
+    info.fsck_requested = false;
+
+    errno = 0;
     FILE *fstab = setmntent("/etc/fstab", "r");
-    if (fstab == nullptr) return false;
-    bool requested = false;
+    if (fstab == nullptr) {
+        if (errno == ENOENT) return true;
+        if (errno == 0) errno = EIO;
+        return false;
+    }
+    info.present = true;
+
     struct mntent *entry;
     while ((entry = getmntent(fstab)) != nullptr) {
-        if (std::strcmp(entry->mnt_dir, "/") == 0 && entry->mnt_passno != 0) {
-            requested = true;
-            break;
+        if (std::strcmp(entry->mnt_dir, "/") != 0) continue;
+        info.found_root = true;
+        info.fsck_requested = entry->mnt_passno != 0;
+        info.readonly = false;
+        std::istringstream options(entry->mnt_opts);
+        std::string option;
+        while (std::getline(options, option, ',')) {
+            if (option == "ro") info.readonly = true;
+            else if (option == "rw") info.readonly = false;
         }
+        break;
     }
+
+    const bool read_error = ferror(fstab) != 0;
+    const int saved_errno = errno;
     endmntent(fstab);
-    return requested;
+    if (read_error) {
+        errno = saved_errno != 0 ? saved_errno : EIO;
+        return false;
+    }
+    return true;
 }
 
 int run_root_fsck()
@@ -740,7 +772,13 @@ int run_root_fsck()
         std::cout << "dinit-bootstrap: root fsck disabled by kernel command line\n";
         return 0;
     }
-    if (!root_fsck_requested()) {
+    root_fstab_info fstab_info;
+    if (!read_root_fstab_info(fstab_info)) {
+        std::cerr << "dinit-bootstrap: cannot read /etc/fstab for root fsck: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (!fstab_info.present || !fstab_info.found_root || !fstab_info.fsck_requested) {
         std::cout << "dinit-bootstrap: root fsck is not requested by /etc/fstab\n";
         return 0;
     }
@@ -865,30 +903,6 @@ int run_mount_local()
     return execute_program(args, false);
 }
 
-bool root_fstab_requests_readonly()
-{
-    FILE *fstab = setmntent("/etc/fstab", "r");
-    if (fstab == nullptr) return true;
-
-    bool found_root = false;
-    bool readonly = true;
-    struct mntent *entry;
-    while ((entry = getmntent(fstab)) != nullptr) {
-        if (std::strcmp(entry->mnt_dir, "/") != 0) continue;
-        found_root = true;
-        readonly = false;
-        std::istringstream options(entry->mnt_opts);
-        std::string option;
-        while (std::getline(options, option, ',')) {
-            if (option == "ro") readonly = true;
-            else if (option == "rw") readonly = false;
-        }
-        break;
-    }
-    endmntent(fstab);
-    return !found_root || readonly;
-}
-
 int run_root_rw()
 {
     FILE *mounts = setmntent("/proc/self/mounts", "r");
@@ -915,7 +929,13 @@ int run_root_rw()
         std::cout << "dinit-bootstrap: root filesystem is already read-write\n";
         return 0;
     }
-    if (root_fstab_requests_readonly()) {
+    root_fstab_info fstab_info;
+    if (!read_root_fstab_info(fstab_info)) {
+        std::cerr << "dinit-bootstrap: cannot read /etc/fstab for root remount: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (!fstab_info.present || !fstab_info.found_root || fstab_info.readonly) {
         std::cout << "dinit-bootstrap: root filesystem is configured read-only or has no fstab policy; leaving it unchanged\n";
         return 0;
     }
