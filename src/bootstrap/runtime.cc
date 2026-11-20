@@ -741,6 +741,7 @@ bool write_root_fsck_status(const std::string &contents)
                 contents.size() - offset);
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) {
+            if (written == 0) errno = EIO;
             write_ok = false;
             break;
         }
@@ -860,11 +861,11 @@ bool read_root_fstab_info(root_fstab_info &info)
 
 int run_root_fsck()
 {
-    if (!clear_root_fsck_status()) return 1;
     if (load_environment_kind() == environment_kind::container) {
         std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
         return 0;
     }
+    if (!clear_root_fsck_status()) return 1;
 
     const fsck_options options = read_fsck_options();
     if (options.skip) {
