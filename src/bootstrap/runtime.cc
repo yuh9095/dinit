@@ -968,7 +968,7 @@ int run_machine_id()
     const char *machine_id_path = "/etc/machine-id";
     struct stat original_stat;
     bool replace_existing = false;
-    int existing_fd = open(machine_id_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int existing_fd = open(machine_id_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (existing_fd >= 0) {
         if (fstat(existing_fd, &original_stat) != 0) {
             const int error = errno;
