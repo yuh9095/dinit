@@ -6,77 +6,117 @@ performs the operations used by those services.
 
 ## Installed layout
 
-* /usr/lib/dinit: target-side C++ helper.
-* /usr/lib/dinit.d: generated early/bootstrap and filesystem service definitions.
-* /etc/dinit.d: generic Linux services and targets, boot.d activation marker, and device/network/storage extension directories.
-* /run/dinit: runtime environment (per-operation status logging is still pending).
+* `/usr/lib/dinit`: target-side C++ helper.
+* `/usr/lib/dinit.d`: generated early/bootstrap and filesystem service definitions.
+* `/etc/dinit.d`: generic Linux services and targets, boot.d activation marker, and device/network/storage extension directories.
+* `/run/dinit`: runtime environment (per-operation status logging is still pending).
 
 The package does not replace the distribution's boot service. The generated
-/etc/dinit.d/boot.d/pre-local.target marker is consumed only by a boot service
-which declares waits-for.d: /etc/dinit.d/boot.d. Distributions using another
-boot arrangement must add pre-local.target to their own boot dependency graph.
+`/etc/dinit.d/boot.d/pre-local.target` marker is consumed only by a boot service
+which declares `waits-for.d: /etc/dinit.d/boot.d`. Distributions using another
+boot arrangement must add `pre-local.target` to their own boot dependency graph.
 
-## Current startup sequence
+## Startup stages
 
-1. bootstrap-proc validates or mounts procfs.
-2. bootstrap-environment inspects PID namespace, container/VM indicators and mounts.
-3. bootstrap-sys prepares sysfs according to the detected environment policy.
-4. bootstrap-dev prepares /dev without covering a runtime-provided mount.
-5. bootstrap-devpts prepares /dev/pts, preserving an existing devpts mount.
-6. bootstrap-shm prepares /dev/shm as tmpfs when it is not already mounted.
-7. early-prepare.target aggregates the pseudofilesystem and device-filesystem stage.
-8. early-modules loads configured kernel modules when modprobe is available.
-9. early-devd is the distribution device-manager extension point.
-10. early-devices.target marks device discovery complete.
-11. early-root-fsck safely skips the mounted root; real root checks belong in the initramfs.
-12. early-root-rw.target remounts the root filesystem read-write when required.
-13. early-machine-id creates a persistent ID when one is absent, outside containers.
-14. early-net-lo brings up loopback before network services.
-15. early-hostname applies /etc/hostname outside containers.
-16. early-sysctl applies sysctl.d settings outside containers.
-17. early-fs-pre.target waits for explicitly enabled non-root local-storage preparation services.
-18. early-fs-fsck checks eligible local fstab filesystems before mounting.
-19. early-fs-fstab.target mounts eligible local fstab entries, excluding network filesystems and sysfs.
-20. early-fs-local.target marks local filesystem preparation complete.
-21. local-fs.target exposes the completed local filesystem stage.
-22. early-hwclock reads the hardware clock when the utility is available.
-23. early-swap enables fstab swap; pre-local.target marks core local startup complete.
-24. network.target waits for distribution-selected network services.
-25. multi-user.target combines local and network readiness.
+The generated services form a dependency graph, not a strictly serialized
+shell script:
 
-The dependency graph uses native Dinit relationships: hard dependencies for
-required preparation and milestone dependencies for distribution-enabled
-local-storage integrations. It is not a serialized shell script.
+1. `bootstrap-proc`, `bootstrap-environment`, `bootstrap-sys`,
+   `bootstrap-dev`, `bootstrap-devpts` and `bootstrap-shm` prepare the
+   required pseudo-filesystems and device filesystem.
+2. `early-prepare.target` aggregates that preparation stage.
+3. `early-modules` loads configured kernel modules when `modprobe` is available.
+4. `early-devd` provides the distribution device-manager integration point.
+5. `early-devices.target` marks the device preparation stage complete.
+6. After `early-devices.target`, the root-filesystem path and the non-root
+   filesystem-preparation path can proceed independently:
+   * `early-root-fsck` performs the guarded root check described below;
+     `early-root-rw.target` then applies the configured root remount policy.
+   * `early-fs-pre.target` waits for enabled non-root storage preparation
+     services; `early-fs-fsck` checks eligible local fstab filesystems before
+     `early-fs-fstab.target` mounts them.
+7. `early-fs-local.target` marks local filesystem preparation complete.
+   `local-fs.target` exposes that completed stage.
+8. Hostname, sysctl, loopback, hardware-clock, machine-id and swap helpers run
+   at their declared dependency points. `pre-local.target` marks core local
+   startup complete.
+9. `network.target` waits for distribution-selected network services;
+   `multi-user.target` combines local and network readiness.
+
+The root check depends on `early-devices.target`, not
+`early-fs-pre.target`. This allows root-device preparation to complete first
+without making root fsck wait for optional integrations intended for other
+local filesystems.
 
 ## Filesystem operations
 
-The C++ helper applies machine-id, hostname, sysctl and loopback settings directly, and
-invokes hwclock, modprobe, fsck, mount and swapon with argv; it does not use a
-shell. Machine-id is preserved when already valid and is never regenerated inside a container.
-Hardware-clock setup is skipped in containers or when hwclock is absent.
-Sysctl settings are read from the standard sysctl.d directories with filename
-precedence; invalid or unavailable settings are logged without aborting boot.
-Module configuration is read from the standard modules-load.d configuration
-directories in precedence order; duplicate filenames are shadowed by the first
-directory, and duplicate module names are loaded once.
-Individual module-load failures are logged but do not block boot. Container
-module loading is skipped. Missing optional fsck/swapon tools are skipped. Root fsck is deliberately
-left to the initramfs: Dinit starts after the kernel has mounted the root
-filesystem, and running a repairing fsck against that mounted device is unsafe.
-A read-only container root is left unchanged. Uncorrected fsck errors and a
-reboot-required result stop the dependent stage.
+The C++ helper applies machine-id, hostname, sysctl and loopback settings
+directly, and invokes hwclock, modprobe, fsck, mount and swapon with argv; it
+does not use a shell. Machine-id is preserved when already valid and is never
+regenerated inside a container. Hardware-clock setup is skipped in containers
+or when hwclock is absent. Sysctl settings are read from the standard sysctl.d
+directories with filename precedence; invalid or unavailable settings are
+logged without aborting boot. Module configuration is read from the standard
+modules-load.d configuration directories in precedence order; duplicate
+filenames are shadowed by the first directory, and duplicate module names are
+loaded once. Individual module-load failures are logged but do not block boot.
+Container module loading is skipped.
 
-Root-device assembly (RAID, LVM, encryption, Btrfs and ZFS for the root
-filesystem) must be completed before Dinit starts, normally in the initramfs.
-For non-root local filesystems, distributions can opt in to storage preparation
-services through /etc/dinit.d/early-fs-pre.d. This directory uses Dinit
-milestone dependencies: when a distribution enables a service there, the
-filesystem stage waits for it to start successfully. No storage tool is enabled
-by default. Device-manager integration is selected by placing the chosen Dinit service
-name in /etc/dinit.d/early-devices.d. Network integration can be selected in
-the same way through /etc/dinit.d/network.d. Both use waits-for dependencies,
-so optional manager failure does not prevent the target from starting. No
-particular device or network manager is selected by the generic package.
+### Root filesystem
+
+Root-device assembly (RAID, LVM, encryption, and any other required root-device
+setup) must be completed before Dinit starts, normally in the initramfs. The
+Dinit root-fsck helper does not attempt to assemble or discover the root device.
+
+The helper skips root fsck in containers, when kernel command-line policy
+disables it, when `/etc/fstab` has no root entry or a zero fsck pass number,
+and when the root is virtual, already read-write, not explicitly mounted
+read-only, or cannot be matched safely to its backing block device. It also
+skips when the required `fsck` frontend or `fsck.TYPE` helper is unavailable.
+It only invokes fsck when the fstab requests a check and the mounted root is
+confirmed read-only and backed by the matching block device. Multiple root
+entries in fstab are treated as ambiguous and cause the operation to fail
+rather than selecting one arbitrarily.
+
+After the root-fsck milestone, `early-root-rw.target` remounts root read-write
+only when fstab contains a root entry whose options do not specify `ro`.
+A root explicitly configured `ro`, or a root without an fstab policy, is left
+unchanged. Container roots are not remounted by this helper.
+
+### Other local filesystems
+
+For non-root local filesystems, the helper runs the system `fsck -A -R`
+frontend, excluding filesystems marked `_netdev`, before the fstab mount stage.
+Missing optional fsck or swapon tools are skipped. A failed fsck or mount
+operation prevents its dependent stage from completing.
+
+## Distribution extension directories
+
+The generic package creates these extension points under `/etc/dinit.d`:
+
+* `early-devices.d` is read through Dinit's `depends-ms.d` mechanism by
+  `early-devd`. Enabled device-preparation services must start successfully
+  before `early-devices.target` can complete.
+* `early-fs-pre.d` is read through `depends-ms.d` by
+  `early-fs-pre.target`. It is intended for non-root local-storage
+  preparation, and those services must start successfully before the local
+  filesystem checks and mounts proceed.
+* `network.d` is read through `waits-for.d` by `network.target`. These
+  services are waited for, but their failure does not prevent the network
+  target from starting.
+
+Dinit treats these as dependency drop-in directories, not strict configuration
+validators: an unreadable directory is warned about and ignored, and a listed
+service that cannot be found is warned about and ignored. A service that is
+found and loaded but fails to start has the effect specified by the dependency
+type: milestone dependencies prevent their target stage from completing,
+whereas `waits-for` dependencies do not.
+
+An extension service must not depend on the target that loads it from its
+drop-in directory. For example, a service in `early-devices.d` must not depend
+on `early-devices.target`; doing so creates a dependency cycle. No particular
+device, storage or network manager is selected by the generic package.
+Distributions opt in by adding the relevant service names to these directories.
 
 ## Compatibility
 
