@@ -715,6 +715,7 @@ fsck_options read_fsck_options()
 struct root_fstab_info {
     bool present;
     bool found_root;
+    bool ambiguous_root;
     bool readonly;
     bool fsck_requested;
 };
@@ -723,6 +724,7 @@ bool read_root_fstab_info(root_fstab_info &info)
 {
     info.present = false;
     info.found_root = false;
+    info.ambiguous_root = false;
     info.readonly = true;
     info.fsck_requested = false;
 
@@ -738,6 +740,10 @@ bool read_root_fstab_info(root_fstab_info &info)
     struct mntent *entry;
     while ((entry = getmntent(fstab)) != nullptr) {
         if (std::strcmp(entry->mnt_dir, "/") != 0) continue;
+        if (info.found_root) {
+            info.ambiguous_root = true;
+            continue;
+        }
         info.found_root = true;
         info.fsck_requested = entry->mnt_passno != 0;
         info.readonly = false;
@@ -747,7 +753,6 @@ bool read_root_fstab_info(root_fstab_info &info)
             if (option == "ro") info.readonly = true;
             else if (option == "rw") info.readonly = false;
         }
-        break;
     }
 
     const bool read_error = ferror(fstab) != 0;
@@ -776,6 +781,10 @@ int run_root_fsck()
     if (!read_root_fstab_info(fstab_info)) {
         std::cerr << "dinit-bootstrap: cannot read /etc/fstab for root fsck: "
                   << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (fstab_info.ambiguous_root) {
+        std::cerr << "dinit-bootstrap: multiple root entries in /etc/fstab; refusing root fsck\n";
         return 1;
     }
     if (!fstab_info.present || !fstab_info.found_root || !fstab_info.fsck_requested) {
@@ -933,6 +942,10 @@ int run_root_rw()
     if (!read_root_fstab_info(fstab_info)) {
         std::cerr << "dinit-bootstrap: cannot read /etc/fstab for root remount: "
                   << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (fstab_info.ambiguous_root) {
+        std::cerr << "dinit-bootstrap: multiple root entries in /etc/fstab; refusing root remount\n";
         return 1;
     }
     if (!fstab_info.present || !fstab_info.found_root || fstab_info.readonly) {

@@ -101,7 +101,7 @@ int main(int argc, char **argv)
         "type = internal\ndepends-on: pseudofs\n";
     const std::string root_fsck =
         "type = scripted\ncommand = " + helper_path + " fsck-root\nrestart = false\n"
-        "depends-on: early-prepare.target\n";
+        "depends-on: early-fs-pre.target\n";
     const std::string root_rw =
         "type = scripted\ncommand = " + helper_path + " root-rw\nrestart = false\n"
         "depends-ms: early-root-fsck\n";
