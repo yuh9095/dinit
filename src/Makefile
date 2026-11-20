@@ -90,7 +90,7 @@ ifeq ($(ENABLE_BOOTSTRAP),yes)
 	@set -e; generic_dir="$(DESTDIR)"$(BOOTSTRAP_GENERIC_SERVICEDIR); for file in bootstrap-generated/generic/* bootstrap-generated/generic/boot.d/* bootstrap-generated/generic/boot-required.d/*; do \
 	  test -f "$$file" || continue; \
 	  case "$$file" in \
-	    bootstrap-generated/generic/boot.d/*) dest="$generic_dir/boot.d/${file##*/}" ;; \
+	    bootstrap-generated/generic/boot.d/*) dest="$$generic_dir/boot.d/$${file##*/}" ;; \
 	    bootstrap-generated/generic/boot-required.d/*) dest="$generic_dir/boot-required.d/${file##*/}" ;; \
 	    *) dest="$$generic_dir/$${file##*/}" ;; \
 	  esac; \
