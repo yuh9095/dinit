@@ -8,13 +8,24 @@ performs the operations used by those services.
 
 * `/usr/lib/dinit`: target-side C++ helper.
 * `/usr/lib/dinit.d`: generated early/bootstrap and filesystem service definitions.
-* `/etc/dinit.d`: generic Linux services and targets, boot.d activation marker, and device/network/storage extension directories.
-* `/run/dinit`: runtime environment (per-operation status logging is still pending).
+* `/etc/dinit.d`: generic Linux services and targets, optional `boot.d` and required `boot-required.d` activation markers, and device/network/storage extension directories.
+* `/run/dinit`: runtime environment and root-fsck recovery status.
 
 The package does not replace the distribution's boot service. The generated
-`/etc/dinit.d/boot.d/pre-local.target` marker is consumed only by a boot service
-which declares `waits-for.d: /etc/dinit.d/boot.d`. Distributions using another
-boot arrangement must add `pre-local.target` to their own boot dependency graph.
+`/etc/dinit.d/boot-required.d/early-root-rw.target` marker must be consumed by
+the distribution's boot service through `depends-ms.d`, so a root-filesystem
+preparation failure is observed as a boot failure and can enter Dinit's native
+boot-failure recovery handling. The optional
+`/etc/dinit.d/boot.d/pre-local.target` marker remains a `waits-for.d`
+extension and does not block boot when it fails. A typical boot service uses:
+
+```ini
+depends-ms.d: /etc/dinit.d/boot-required.d
+waits-for.d: /etc/dinit.d/boot.d
+```
+
+Distributions using another boot arrangement must provide the equivalent hard
+dependency on `early-root-rw.target`.
 
 ## Startup stages
 
@@ -79,11 +90,14 @@ confirmed read-only and backed by the matching block device. When a root operati
 treated as ambiguous and cause that operation to fail rather than selecting
 one arbitrarily.
 
-The helper accepts fsck status 0 (clean) and 1 (errors corrected). The fsck
-status bits for reboot-required (2) and uncorrected errors (4) are reported
-distinctly and fail the root-fsck milestone. Unlike systemd, this initial
-Bootstrap implementation does not yet translate those conditions into
-separate reboot and emergency actions.
+The helper accepts fsck status 0 (clean) and 1 (errors corrected). The fsck status bits for reboot-required (2) and uncorrected errors (4) are
+reported distinctly and fail the root-fsck milestone. Only a normal fsck process
+exit is interpreted as an fsck bitmask; an execution failure or signal
+termination is reported separately and cannot be mistaken for an fsck status.
+Failed attempts are recorded atomically in `/run/dinit/root-fsck.status` for a
+distribution-provided recovery service. Unlike systemd, this initial Bootstrap
+implementation does not yet translate those conditions into separate reboot
+and emergency actions.
 
 After the root-fsck milestone, `early-root-rw.target` remounts root read-write
 only when fstab contains a root entry whose options do not specify `ro`.

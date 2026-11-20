@@ -69,9 +69,11 @@ int main(int argc, char **argv)
     const std::string early_dir = output_dir + "/early";
     const std::string generic_dir = output_dir + "/generic";
     const std::string boot_dir = generic_dir + "/boot.d";
+    const std::string boot_required_dir = generic_dir + "/boot-required.d";
     const std::string fs_pre_dir = generic_dir + "/early-fs-pre.d";
     if (!make_directory(output_dir) || !make_directory(early_dir) ||
             !make_directory(generic_dir) || !make_directory(boot_dir) ||
+            !make_directory(boot_required_dir) ||
             !make_directory(fs_pre_dir) || !make_directory(generic_dir + "/early-devices.d") ||
             !make_directory(generic_dir + "/network.d"))
         return 1;
@@ -186,6 +188,8 @@ int main(int argc, char **argv)
     ok = write_service(generic_dir, "network.target", network) && ok;
     ok = write_service(generic_dir, "multi-user.target", multi_user) && ok;
     ok = write_file(boot_dir + "/pre-local.target",
-            "# Generated activation marker; consumed by a boot service using waits-for.d.\n") && ok;
+            "# Optional activation marker; consumed through waits-for.d.\n") && ok;
+    ok = write_file(boot_required_dir + "/early-root-rw.target",
+            "# Required root-filesystem milestone; consume through depends-ms.d.\n") && ok;
     return ok ? 0 : 1;
 }
