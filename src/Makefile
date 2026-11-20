@@ -91,7 +91,7 @@ ifeq ($(ENABLE_BOOTSTRAP),yes)
 	  test -f "$$file" || continue; \
 	  case "$$file" in \
 	    bootstrap-generated/generic/boot.d/*) dest="$$generic_dir/boot.d/$${file##*/}" ;; \
-	    bootstrap-generated/generic/boot-required.d/*) dest="$generic_dir/boot-required.d/${file##*/}" ;; \
+	    bootstrap-generated/generic/boot-required.d/*) dest="$$generic_dir/boot-required.d/$${file##*/}" ;; \
 	    *) dest="$$generic_dir/$${file##*/}" ;; \
 	  esac; \
 	  if test ! -e "$$dest"; then install -m 0644 "$$file" "$$dest"; \
