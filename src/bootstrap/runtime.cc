@@ -865,6 +865,30 @@ int run_mount_local()
     return execute_program(args, false);
 }
 
+bool root_fstab_requests_readonly()
+{
+    FILE *fstab = setmntent("/etc/fstab", "r");
+    if (fstab == nullptr) return true;
+
+    bool found_root = false;
+    bool readonly = true;
+    struct mntent *entry;
+    while ((entry = getmntent(fstab)) != nullptr) {
+        if (std::strcmp(entry->mnt_dir, "/") != 0) continue;
+        found_root = true;
+        readonly = false;
+        std::istringstream options(entry->mnt_opts);
+        std::string option;
+        while (std::getline(options, option, ',')) {
+            if (option == "ro") readonly = true;
+            else if (option == "rw") readonly = false;
+        }
+        break;
+    }
+    endmntent(fstab);
+    return !found_root || readonly;
+}
+
 int run_root_rw()
 {
     FILE *mounts = setmntent("/proc/self/mounts", "r");
@@ -882,6 +906,10 @@ int run_root_rw()
     endmntent(mounts);
     if (root_is_rw) {
         std::cout << "dinit-bootstrap: root filesystem is already read-write\n";
+        return 0;
+    }
+    if (root_fstab_requests_readonly()) {
+        std::cout << "dinit-bootstrap: root filesystem is configured read-only or has no fstab policy; leaving it unchanged\n";
         return 0;
     }
     if (load_environment_kind() == environment_kind::container) {
@@ -1192,6 +1220,10 @@ int run_machine_id()
     std::string temporary_path = "/etc/.machine-id.XXXXXX";
     int temporary_fd = mkstemp(&temporary_path[0]);
     if (temporary_fd < 0) {
+        if (errno == EROFS) {
+            std::cout << "dinit-bootstrap: /etc is read-only; skipping machine-id creation\n";
+            return 0;
+        }
         std::cerr << "dinit-bootstrap: cannot create temporary machine-id: "
                   << std::strerror(errno) << '\n';
         return 1;
