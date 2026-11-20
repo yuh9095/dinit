@@ -102,6 +102,11 @@ Bootstrap conservatively uses the container policy. The runtime name is optional
 diagnostic information only; Docker, Podman, LXC, DroidSpaces, or any other
 specific runtime is not required.
 
+Detection is best-effort rather than a universal container oracle. A container
+that shares the host PID namespace and exposes no recognizable runtime or
+cgroup marker may be indistinguishable from the host from inside the helper.
+Such deployments should provide a standard container marker when available.
+
 Virtual machines follow the non-container path because a VM guest has its own
 Linux kernel and machine scope. Bootstrap does not identify hypervisor vendors
 or maintain a separate VM environment class.
