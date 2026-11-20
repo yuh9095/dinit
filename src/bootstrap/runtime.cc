@@ -107,8 +107,12 @@ bool contains_cgroup_marker(const std::string &cgroup, const char *marker)
 
 std::string detect_container()
 {
-    // Explicit runtime indicators only. PID namespace nesting by itself does
-    // not grant the relaxed container mount policy.
+    // A manager-provided marker is preferable when this helper is not PID 1.
+    if (path_exists("/run/systemd/container")) {
+        const std::string marker = trim(read_file("/run/systemd/container"));
+        if (!is_unknown_marker(marker)) return marker;
+    }
+
     const char *env = std::getenv("container");
     if (env != nullptr) {
         const std::string marker = trim(env);
@@ -236,21 +240,39 @@ environment_info detect_environment()
     environment_info info;
     info.pid1 = getppid() == 1;
 
-    // NSpid lists one PID for each visible ancestor PID namespace.
-    const std::string status = read_file("/proc/self/status");
-    const std::string nspid = "NSpid:";
-    const std::string::size_type nspid_pos = status.find(nspid);
+    // Linux has used inode 0xEFFFFFFC for the initial PID namespace since
+    // kernel 3.8. This follows systemd's namespace_is_init() approach and
+    // remains useful when /proc is mounted from inside the current namespace,
+    // where NSpid may expose only one PID.
+    struct stat pid_namespace_stat;
     info.nested_pid_namespace = false;
-    info.pid_namespace_depth_known = nspid_pos != std::string::npos;
+    info.pid_namespace_depth_known =
+            stat("/proc/self/ns/pid", &pid_namespace_stat) == 0;
     if (info.pid_namespace_depth_known) {
-        std::istringstream values(status.substr(nspid_pos + nspid.size()));
-        std::string value;
-        unsigned int count = 0;
-        while (values >> value && value.find(':') == std::string::npos) ++count;
-        info.nested_pid_namespace = count > 1;
+        info.nested_pid_namespace = pid_namespace_stat.st_ino != 0xEFFFFFFC;
+    }
+    else {
+        // Retain NSpid as a fallback for procfs implementations where the
+        // namespace magic link cannot be inspected.
+        const std::string status = read_file("/proc/self/status");
+        const std::string nspid = "NSpid:";
+        const std::string::size_type nspid_pos = status.find(nspid);
+        if (nspid_pos != std::string::npos) {
+            std::istringstream values(status.substr(nspid_pos + nspid.size()));
+            std::string value;
+            unsigned int count = 0;
+            while (values >> value && value.find(':') == std::string::npos) ++count;
+            info.pid_namespace_depth_known = count > 0;
+            info.nested_pid_namespace = count > 1;
+        }
     }
 
     info.container_name = detect_container();
+    // A nested PID namespace is sufficient to identify a generic container
+    // when no runtime-specific name is available.
+    if (info.container_name.empty() && info.pid_namespace_depth_known &&
+            info.nested_pid_namespace)
+        info.container_name = "other";
     info.virtualization = detect_virtual_machine();
 
     const mount_info mounts = detect_mounts();
@@ -264,13 +286,13 @@ environment_info detect_environment()
     else if (mounts.cgroup_v2) info.cgroups = "v2";
     else if (mounts.cgroup_v1) info.cgroups = "v1";
     else info.cgroups = "none";
-    // Virtual machines always retain the strict host policy. A container
-    // marker must never override positive virtualization evidence.
-    if (!info.virtualization.empty()) {
-        info.kind = environment_kind::virtual_machine;
-    }
-    else if (!info.container_name.empty()) {
+    // Match systemd's innermost-environment policy: a container inside a VM
+    // is classified as a container, while the outer VM identity is retained.
+    if (!info.container_name.empty()) {
         info.kind = environment_kind::container;
+    }
+    else if (!info.virtualization.empty()) {
+        info.kind = environment_kind::virtual_machine;
     }
     else if (!info.pid_namespace_depth_known) {
         info.kind = environment_kind::unknown;
@@ -446,6 +468,16 @@ environment_kind load_environment_kind()
         if (line == "kind=container") return environment_kind::container;
     }
     return environment_kind::unknown;
+}
+
+// Operations that may affect shared kernel or host-level state are permitted
+// only when the environment has been positively classified as a host or VM.
+// Unknown environments are deliberately not treated as bare metal.
+bool environment_allows_machine_operations()
+{
+    const environment_kind kind = load_environment_kind();
+    return kind == environment_kind::bare_metal ||
+            kind == environment_kind::virtual_machine;
 }
 
 int mount_failure(environment_kind kind, const char *filesystem,
@@ -1035,8 +1067,8 @@ bool read_root_fstab_info(root_fstab_info &info)
 
 int run_root_fsck()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: root fsck is skipped in a container or unknown environment\n";
         return 0;
     }
     if (!clear_root_fsck_status()) return 1;
@@ -1179,8 +1211,8 @@ int run_root_fsck()
 
 int run_local_fsck()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: local fsck is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: local fsck is skipped in a container or unknown environment\n";
         return 0;
     }
     const fsck_options options = read_fsck_options();
@@ -1205,8 +1237,8 @@ int run_local_fsck()
 
 int run_mount_local()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: fstab mounting is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: fstab mounting is skipped in a container or unknown environment\n";
         return 0;
     }
     std::vector<std::string> args;
@@ -1256,8 +1288,8 @@ int run_root_rw()
         std::cout << "dinit-bootstrap: root filesystem is configured read-only or has no fstab policy; leaving it unchanged\n";
         return 0;
     }
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: read-only container root is left unchanged\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: read-only root in a container or unknown environment is left unchanged\n";
         return 0;
     }
     std::vector<std::string> args;
@@ -1268,8 +1300,8 @@ int run_root_rw()
 
 int run_swap_on()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: swap activation is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: swap activation is skipped in a container or unknown environment\n";
         return 0;
     }
     std::vector<std::string> args;
@@ -1307,8 +1339,8 @@ std::map<std::string, std::string> collect_config_files(const char *subdirectory
 
 int run_modules_load()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: module loading is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: module loading is skipped in a container or unknown environment\n";
         return 0;
     }
     if (find_executable("modprobe").empty()) {
@@ -1368,8 +1400,8 @@ int run_modules_load()
 
 int run_set_hostname()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: hostname is supplied by the container runtime; leaving it unchanged\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: hostname is left unchanged in a container or unknown environment\n";
         return 0;
     }
     const std::string hostname = trim(read_file("/etc/hostname"));
@@ -1391,8 +1423,8 @@ int run_set_hostname()
 
 int run_sysctl_load()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: sysctl loading is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: sysctl loading is skipped in a container or unknown environment\n";
         return 0;
     }
     const std::map<std::string, std::string> files = collect_config_files("sysctl.d");
@@ -1442,8 +1474,8 @@ int run_sysctl_load()
 
 int run_machine_id()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: machine-id is supplied by the container runtime; leaving it unchanged\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: machine-id is left unchanged in a container or unknown environment\n";
         return 0;
     }
 
@@ -1698,12 +1730,13 @@ int run_loopback_up()
 {
     const int socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd < 0) {
-        if (load_environment_kind() == environment_kind::container) {
-            std::cout << "dinit-bootstrap: cannot inspect loopback in container; skipping\n";
+        const int error = errno;
+        if (error == EPERM || error == EACCES) {
+            std::cout << "dinit-bootstrap: permission to inspect loopback is unavailable; skipping\n";
             return 0;
         }
         std::cerr << "dinit-bootstrap: cannot open network control socket: "
-                  << std::strerror(errno) << '\n';
+                  << std::strerror(error) << '\n';
         return 1;
     }
 
@@ -1713,8 +1746,8 @@ int run_loopback_up()
     if (ioctl(socket_fd, SIOCGIFFLAGS, &request) != 0) {
         const int error = errno;
         close(socket_fd);
-        if (load_environment_kind() == environment_kind::container) {
-            std::cout << "dinit-bootstrap: loopback interface is unavailable in container; skipping\n";
+        if (error == ENODEV || error == ENXIO || error == EPERM || error == EACCES) {
+            std::cout << "dinit-bootstrap: loopback interface is unavailable or cannot be inspected; skipping\n";
             return 0;
         }
         std::cerr << "dinit-bootstrap: cannot inspect loopback interface: "
@@ -1730,9 +1763,8 @@ int run_loopback_up()
     if (ioctl(socket_fd, SIOCSIFFLAGS, &request) != 0) {
         const int error = errno;
         close(socket_fd);
-        if (load_environment_kind() == environment_kind::container &&
-                (error == EPERM || error == EACCES)) {
-            std::cout << "dinit-bootstrap: container lacks permission to bring loopback up; skipping\n";
+        if (error == EPERM || error == EACCES) {
+            std::cout << "dinit-bootstrap: permission to bring loopback up is unavailable; skipping\n";
             return 0;
         }
         std::cerr << "dinit-bootstrap: cannot bring loopback interface up: "
@@ -1746,8 +1778,8 @@ int run_loopback_up()
 
 int run_hwclock()
 {
-    if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: hardware clock setup is skipped inside a container\n";
+    if (!environment_allows_machine_operations()) {
+        std::cout << "dinit-bootstrap: hardware clock setup is skipped in a container or unknown environment\n";
         return 0;
     }
     if (find_executable("hwclock").empty()) {
@@ -1794,8 +1826,7 @@ int run_detect(bool stay)
     if (!info.container_name.empty())
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
     if (!info.virtualization.empty())
-        std::cout << "dinit-bootstrap: virtualization: " << info.virtualization
-                  << " (using bare-metal policy)\n";
+        std::cout << "dinit-bootstrap: virtualization: " << info.virtualization << '\n';
 
     if (!info.pid1) {
         std::cerr << "dinit-bootstrap: refusing system bootstrap: helper parent is not PID 1\n";

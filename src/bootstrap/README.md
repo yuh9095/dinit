@@ -89,15 +89,42 @@ The mountinfo parser's unprivileged fixture tests can be run with
 
 The C++ helper applies machine-id, hostname, sysctl and loopback settings
 directly, and invokes hwclock, modprobe, fsck, mount and swapon with argv; it
-does not use a shell. Machine-id is preserved when already valid and is never
-regenerated inside a container. Hardware-clock setup is skipped in containers
-or when hwclock is absent. Sysctl settings are read from the standard sysctl.d
-directories with filename precedence; invalid or unavailable settings are
-logged without aborting boot. Module configuration is read from the standard
-modules-load.d configuration directories in precedence order; duplicate
-filenames are shadowed by the first directory, and duplicate module names are
-loaded once. Individual module-load failures are logged but do not block boot.
-Container module loading is skipped.
+does not use a shell.
+
+### Environment detection and operation policy
+
+Container detection follows the same broad ordering as systemd: explicit
+runtime information and marker files are checked first, then the current PID
+namespace is inspected. Linux has used inode `0xEFFFFFFC` for the initial PID
+namespace since kernel 3.8. When the helper is in a nested PID namespace and
+no runtime-specific name is available, the environment is classified as the
+generic container type (`other`). A container inside a VM is classified as a
+container for the primary environment kind; the VM identity is retained as
+separate diagnostic information.
+
+The container name is optional and is never required for container operation.
+An unknown environment is not treated as bare metal: operations that may
+affect machine-wide state (module loading, hardware-clock access, sysctl
+application, swap activation, fstab-driven filesystem checks and mounts,
+root fsck/remounting, hostname changes and machine-id creation) are skipped
+unless the environment is positively classified as bare metal or a VM.
+Loopback setup instead checks the interface and actual operation result;
+permission denials are non-fatal regardless of the container runtime name.
+
+The Dinit-parent PID 1 check is independent of environment classification: it
+verifies that the helper was launched by the system init process and does not
+decide whether the environment is a container or a VM.
+
+Machine-id is preserved when already valid and is not generated in containers
+or unknown environments. Hardware-clock setup is skipped in containers and
+unknown environments, or when hwclock is absent. Sysctl settings are read
+from the standard sysctl.d directories with filename precedence; invalid or
+unavailable settings are logged without aborting boot. Module configuration
+is read from the standard modules-load.d configuration directories in
+precedence order; duplicate filenames are shadowed by the first directory,
+and duplicate module names are loaded once. Individual module-load failures
+are logged but do not block boot. Container and unknown-environment module
+loading is skipped.
 
 ### Root filesystem
 
@@ -105,9 +132,10 @@ Root-device assembly (RAID, LVM, encryption, and any other required root-device
 setup) must be completed before Dinit starts, normally in the initramfs. The
 Dinit root-fsck helper does not attempt to assemble or discover the root device.
 
-The helper skips root fsck in containers, when kernel command-line policy
-disables it, when `/etc/fstab` has no root entry, a non-positive fsck pass
-number, or the `noauto` option, and when the root is virtual, already
+The helper skips root fsck in containers and unknown environments, when
+kernel command-line policy disables it, when `/etc/fstab` has no root entry,
+a non-positive fsck pass number, or the `noauto` option, and when the root is
+virtual, already
 read-write, not explicitly mounted read-only, or cannot be matched safely to
 its backing block device. It also
 skips when the required `fsck` frontend or `fsck.TYPE` helper is unavailable.
@@ -130,12 +158,14 @@ and emergency actions.
 After the root-fsck milestone, `early-root-rw.target` remounts root read-write
 only when fstab contains a root entry whose options do not specify `ro`.
 A root explicitly configured `ro`, or a root without an fstab policy, is left
-unchanged. Container roots are not remounted by this helper.
+unchanged. Container and unknown-environment roots are not remounted by this
+helper.
 
 ### Other local filesystems
 
 For non-root local filesystems, the helper runs the system `fsck -A -R`
 frontend, excluding filesystems marked `_netdev`, before the fstab mount stage.
+Container and unknown environments skip local fsck and fstab mounting.
 Missing optional fsck or swapon tools are skipped. A failed fsck or mount
 operation prevents its dependent stage from completing.
 
