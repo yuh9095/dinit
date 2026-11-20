@@ -37,10 +37,13 @@ shell script:
    required pseudo-filesystems and device filesystem.
 2. `early-prepare.target` aggregates that preparation stage.
 3. `early-modules` loads configured kernel modules when `modprobe` is available.
-4. `early-devd` provides the distribution device-manager integration point.
-5. `early-devices.target` marks the device preparation stage complete.
+4. `early-devd` provides the distribution device-manager integration point;
+   enabled services in `early-devices.d` are required to start successfully.
+5. `early-devices.target` marks device preparation complete only after
+   `early-devd` succeeds.
 6. After `early-devices.target`, the root-filesystem path and the non-root
-   filesystem-preparation path can proceed independently:
+   filesystem-preparation path can proceed independently. Device-stage failure
+   blocks both paths:
    * `early-root-fsck` performs the guarded root check described below;
      `early-root-rw.target` then applies the configured root remount policy.
    * `early-fs-pre.target` waits for enabled non-root storage preparation
@@ -123,7 +126,9 @@ The generic package creates these extension points under `/etc/dinit.d`:
 * `early-fs-pre.d` is read through `depends-ms.d` by
   `early-fs-pre.target`. It is intended for non-root local-storage
   preparation, and those services must start successfully before the local
-  filesystem checks and mounts proceed.
+  filesystem checks and mounts proceed. The filesystem check, mount, and
+  local-fs aggregate stages use milestone dependencies so a failed preparation
+  or check cannot be bypassed by a soft dependency.
 * `network.d` is read through `waits-for.d` by `network.target`. These
   services are waited for, but their failure does not prevent the network
   target from starting.

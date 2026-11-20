@@ -129,30 +129,30 @@ int main(int argc, char **argv)
         "type = internal\ndepends-on: early-modules\n"
         "depends-ms.d: " + quote_dinit_value(generic_service_dir + "/early-devices.d") + "\n";
     const std::string devices =
-        "type = internal\ndepends-on: early-devd\n";
+        "type = internal\ndepends-ms: early-devd\n";
     const std::string fs_pre =
-        "type = internal\ndepends-on: early-devices.target\n"
+        "type = internal\ndepends-ms: early-devices.target\n"
         "depends-ms.d: " + quote_dinit_value(generic_service_dir + "/early-fs-pre.d") + "\n";
     const std::string fsck_local =
         "type = scripted\ncommand = " + helper_path + " fsck-local\nrestart = false\n"
-        "depends-on: early-fs-pre.target\n";
+        "depends-ms: early-fs-pre.target\n";
     const std::string fs_fstab =
         "type = scripted\ncommand = " + helper_path + " mount-local\nrestart = false\n"
-        "depends-on: early-fs-pre.target\n"
+        "depends-ms: early-fs-pre.target\n"
         "depends-ms: early-root-rw.target\ndepends-ms: early-fs-fsck\n";
     const std::string fs_local =
-        "type = internal\ndepends-on: early-fs-pre.target\n"
-        "depends-on: early-fs-fstab.target\n";
+        "type = internal\ndepends-ms: early-fs-pre.target\n"
+        "depends-ms: early-fs-fstab.target\n";
     const std::string swap =
         "type = scripted\ncommand = " + helper_path + " swap-on\nrestart = false\n"
         "depends-on: early-fs-local.target\n";
     const std::string local_fs =
-        "type = internal\ndepends-on: early-fs-local.target\n";
+        "type = internal\ndepends-ms: early-fs-local.target\n";
     const std::string pre_local =
-        "type = internal\ndepends-on: local-fs.target\ndepends-on: early-sysctl\n"
+        "type = internal\ndepends-ms: local-fs.target\ndepends-on: early-sysctl\n"
         "depends-on: early-hwclock\ndepends-on: early-machine-id\nwaits-for: early-swap\n";
     const std::string local =
-        "type = internal\ndepends-on: pre-local.target\n";
+        "type = internal\ndepends-ms: pre-local.target\n";
     const std::string network =
         "type = internal\ndepends-on: early-net-lo\nwaits-for.d: " + quote_dinit_value(generic_service_dir + "/network.d") + "\n";
     const std::string multi_user =
