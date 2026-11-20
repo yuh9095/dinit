@@ -45,6 +45,8 @@ void cycles_test();
 void svc_arg_test();
 void svc_arg_consumer_test();
 void svc_arg_enable_test();
+void dep_dir_semantics_test();
+void dep_dir_cycle_test();
 
 int main(int argc, char **argv)
 {
@@ -63,7 +65,9 @@ int main(int argc, char **argv)
             { "catlog", catlog_test }, { "offline-enable", offline_enable_test },
             { "xdg-config", xdg_config_test }, { "cycles", cycles_test },
             { "svc-arg", svc_arg_test }, { "svc-arg-consumer", svc_arg_consumer_test },
-            { "svc-arg-enable", svc_arg_enable_test } };
+            { "svc-arg-enable", svc_arg_enable_test },
+            { "dep-dir-semantics", dep_dir_semantics_test },
+            { "dep-dir-cycle", dep_dir_cycle_test } };
 
     dinit_bindir = "../..";
     char *env_dinit_bindir = getenv("DINIT_BINDIR");
@@ -722,6 +726,49 @@ void dep_not_found_test()
     igr_assert_eq(read_file_contents(igr_input_basedir + "/dep-not-found/output.expected"),
             dinitctl_p.get_stderr());
     igr_assert_eq("", dinitctl_p.get_stdout());
+}
+
+
+void dep_dir_semantics_test()
+{
+    // Directory dependencies must preserve Dinit's three distinct dependency
+    // semantics: milestone failures propagate, waits-for failures do not, and
+    // missing optional extension entries are ignored.
+    igr_test_setup setup("dep-dir-semantics");
+    std::string socket_path = setup.prep_socket_path();
+
+    dinit_proc dinit_p;
+    dinit_p.start("dep-dir-semantics", {"-u", "-d", "sd", "-p", socket_path, "-q"}, true);
+
+    dinitctl_proc dinitctl_p;
+    dinitctl_p.start("dep-dir-semantics", {"-u", "-p", socket_path,
+            "start", "milestone-target"});
+    int status = dinitctl_p.wait_for_term({2, 0});
+    igr_assert(status == 1, "milestone dependency failure was not propagated");
+
+    dinitctl_p.start("dep-dir-semantics", {"-u", "-p", socket_path,
+            "start", "waits-target"});
+    status = dinitctl_p.wait_for_term({2, 0});
+    igr_assert(status == 0, "waits-for dependency failure incorrectly failed target");
+
+    dinitctl_p.start("dep-dir-semantics", {"-u", "-p", socket_path,
+            "start", "missing-dir-target"});
+    status = dinitctl_p.wait_for_term({2, 0});
+    igr_assert(status == 0, "missing optional dependency directory failed target");
+
+    dinitctl_p.start("dep-dir-semantics", {"-u", "-p", socket_path,
+            "start", "unresolved-target"});
+    status = dinitctl_p.wait_for_term({2, 0});
+    igr_assert(status == 0, "unresolved optional dependency entry failed target");
+}
+
+void dep_dir_cycle_test()
+{
+    igr_test_setup setup("dep-dir-cycle");
+    auto check_result = run_dinitcheck("dep-dir-cycle", {"-d", "sd"});
+    igr_assert(check_result.second == 1, "dinit-check did not reject directory dependency cycle");
+    igr_assert(check_result.first.find("cycle") != std::string::npos,
+            "dinit-check did not report a dependency cycle");
 }
 
 void pseudo_cycle_test()

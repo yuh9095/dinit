@@ -1,0 +1,2 @@
+type = internal
+depends-ms.d = does-not-exist.d

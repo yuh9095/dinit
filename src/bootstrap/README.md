@@ -69,14 +69,21 @@ setup) must be completed before Dinit starts, normally in the initramfs. The
 Dinit root-fsck helper does not attempt to assemble or discover the root device.
 
 The helper skips root fsck in containers, when kernel command-line policy
-disables it, when `/etc/fstab` has no root entry or a zero fsck pass number,
-and when the root is virtual, already read-write, not explicitly mounted
-read-only, or cannot be matched safely to its backing block device. It also
+disables it, when `/etc/fstab` has no root entry, a non-positive fsck pass
+number, or the `noauto` option, and when the root is virtual, already
+read-write, not explicitly mounted read-only, or cannot be matched safely to
+its backing block device. It also
 skips when the required `fsck` frontend or `fsck.TYPE` helper is unavailable.
 It only invokes fsck when the fstab requests a check and the mounted root is
 confirmed read-only and backed by the matching block device. When a root operation needs to consult fstab, multiple root entries are
 treated as ambiguous and cause that operation to fail rather than selecting
 one arbitrarily.
+
+The helper accepts fsck status 0 (clean) and 1 (errors corrected). The fsck
+status bits for reboot-required (2) and uncorrected errors (4) are reported
+distinctly and fail the root-fsck milestone. Unlike systemd, this initial
+Bootstrap implementation does not yet translate those conditions into
+separate reboot and emergency actions.
 
 After the root-fsck milestone, `early-root-rw.target` remounts root read-write
 only when fstab contains a root entry whose options do not specify `ro`.

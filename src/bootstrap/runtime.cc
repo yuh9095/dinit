@@ -745,14 +745,19 @@ bool read_root_fstab_info(root_fstab_info &info)
             continue;
         }
         info.found_root = true;
-        info.fsck_requested = entry->mnt_passno != 0;
+        info.fsck_requested = entry->mnt_passno > 0;
         info.readonly = false;
+        bool noauto = false;
         std::istringstream options(entry->mnt_opts);
         std::string option;
         while (std::getline(options, option, ',')) {
             if (option == "ro") info.readonly = true;
             else if (option == "rw") info.readonly = false;
+            else if (option == "noauto") noauto = true;
         }
+        // systemd-fstab-generator does not schedule an automatic fsck for
+        // entries explicitly excluded from automatic activation.
+        if (noauto) info.fsck_requested = false;
     }
 
     const bool read_error = ferror(fstab) != 0;
@@ -869,7 +874,23 @@ int run_root_fsck()
 
     const int result = execute_program(args, false);
     if (result == 0 || result == 1) return 0;
-    std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")\n";
+
+    // fsck uses a bitmask, not a simple success/failure status. Preserve the
+    // two recovery-critical conditions in diagnostics even though this helper
+    // currently reports both as a failed milestone to Dinit.
+    if ((result & 2) != 0) {
+        std::cerr << "dinit-bootstrap: root fsck requests a system reboot";
+        if ((result & 4) != 0)
+            std::cerr << " and reports uncorrected filesystem errors";
+        std::cerr << " (status " << result << ")\n";
+    }
+    else if ((result & 4) != 0) {
+        std::cerr << "dinit-bootstrap: root fsck left filesystem errors uncorrected"
+                  << " (status " << result << ")\n";
+    }
+    else {
+        std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")\n";
+    }
     return 1;
 }
 
