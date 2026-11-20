@@ -195,11 +195,15 @@ jobs:
         test -x /tmp/dinit-bootstrap-install/usr/lib/dinit/dinit-bootstrap
         test -f /tmp/dinit-bootstrap-install/usr/lib/dinit.d/bootstrap-proc
         test -f /tmp/dinit-bootstrap-install/etc/dinit.d/multi-user.target
+        test -f /tmp/dinit-bootstrap-install/etc/dinit.d/boot.d/pre-local.target
+        test -f /tmp/dinit-bootstrap-install/etc/dinit.d/boot-required.d/early-root-rw.target
     - name: Verify Bootstrap dependency stages
       run: |
         early=src/bootstrap-generated/early
         generic=src/bootstrap-generated/generic
-        grep -Fxq 'depends-on: early-devices.target' "$early/early-root-fsck"
+        test -f "$generic/boot.d/pre-local.target"
+        test -f "$generic/boot-required.d/early-root-rw.target"
+        grep -Fxq 'depends-ms: early-devices.target' "$early/early-root-fsck"
         ! grep -Fxq 'depends-on: early-fs-pre.target' "$early/early-root-fsck"
         grep -Fxq 'depends-on: early-devices.target' "$early/early-fs-pre.target"
         grep -Fxq 'depends-on: early-fs-pre.target' "$early/early-fs-fsck"

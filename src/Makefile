@@ -84,13 +84,14 @@ ifeq ($(BUILD_SHUTDOWN),yes)
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)poweroff
 endif
 ifeq ($(ENABLE_BOOTSTRAP),yes)
-	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-fs-pre.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-devices.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/network.d
+	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot-required.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-fs-pre.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-devices.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/network.d
 	install $(STRIPOPTS) dinit-bootstrap $(DESTDIR)$(BOOTSTRAP_LIBDIR)/dinit-bootstrap
 	install -m 0644 bootstrap-generated/early/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
-	@set -e; generic_dir="$(DESTDIR)"$(BOOTSTRAP_GENERIC_SERVICEDIR); for file in bootstrap-generated/generic/* bootstrap-generated/generic/boot.d/*; do \
+	@set -e; generic_dir="$(DESTDIR)"$(BOOTSTRAP_GENERIC_SERVICEDIR); for file in bootstrap-generated/generic/* bootstrap-generated/generic/boot.d/* bootstrap-generated/generic/boot-required.d/*; do \
 	  test -f "$$file" || continue; \
 	  case "$$file" in \
-	    bootstrap-generated/generic/boot.d/*) dest="$$generic_dir/boot.d/$${file##*/}" ;; \
+	    bootstrap-generated/generic/boot.d/*) dest="$generic_dir/boot.d/${file##*/}" ;; \
+    bootstrap-generated/generic/boot-required.d/*) dest="$generic_dir/boot-required.d/${file##*/}" ;; \
 	    *) dest="$$generic_dir/$${file##*/}" ;; \
 	  esac; \
 	  if test ! -e "$$dest"; then install -m 0644 "$$file" "$$dest"; \
