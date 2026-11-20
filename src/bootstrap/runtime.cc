@@ -774,11 +774,13 @@ int run_root_fsck()
     }
     std::string root_source;
     std::string root_type;
+    bool root_is_readonly = false;
     struct mntent *mount_entry;
     while ((mount_entry = getmntent(mounts)) != nullptr) {
         if (std::strcmp(mount_entry->mnt_dir, "/") == 0) {
             root_source = mount_entry->mnt_fsname;
             root_type = mount_entry->mnt_type;
+            root_is_readonly = hasmntopt(mount_entry, "ro") != nullptr;
             break;
         }
     }
@@ -787,6 +789,13 @@ int run_root_fsck()
     if (root_source.empty() || root_type.empty()) {
         std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing fsck\n";
         return 1;
+    }
+
+    // A failed timestamp probe alone is not enough: require the mount table
+    // to explicitly report a read-only root before invoking fsck.
+    if (!root_is_readonly) {
+        std::cout << "dinit-bootstrap: root mount is not marked read-only; skipping fsck\n";
+        return 0;
     }
 
     struct stat device_stat;
