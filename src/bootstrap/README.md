@@ -93,38 +93,31 @@ does not use a shell.
 
 ### Environment detection and operation policy
 
-Container detection follows the same broad ordering as systemd: explicit
-runtime information and marker files are checked first, then the current PID
-namespace is inspected. Linux has used inode `0xEFFFFFFC` for the initial PID
-namespace since kernel 3.8. When the helper is in a nested PID namespace and
-no runtime-specific name is available, the environment is classified as the
-generic container type (`other`). A container inside a VM is classified as a
-container for the primary environment kind; the VM identity is retained as
-separate diagnostic information.
+Bootstrap uses one environment distinction: container or non-container Linux.
+The detector checks runtime-provided markers, common container marker files,
+cgroup identifiers, and the current PID namespace. A nested PID namespace is
+sufficient to classify a generic container when no runtime name is available.
+If PID-namespace inspection is unavailable and no runtime marker is found,
+Bootstrap conservatively uses the container policy. The runtime name is optional
+diagnostic information only; Docker, Podman, LXC, DroidSpaces, or any other
+specific runtime is not required.
 
-The container name is optional and is never required for container operation.
-An unknown environment is not treated as bare metal: operations that may
-affect machine-wide state (module loading, hardware-clock access, sysctl
-application, swap activation, fstab-driven filesystem checks and mounts,
-root fsck/remounting, hostname changes and machine-id creation) are skipped
-unless the environment is positively classified as bare metal or a VM.
-Loopback setup instead checks the interface and actual operation result;
-permission denials are non-fatal regardless of the container runtime name.
+Virtual machines follow the non-container path because a VM guest has its own
+Linux kernel and machine scope. Bootstrap does not identify hypervisor vendors
+or maintain a separate VM environment class.
 
-The Dinit-parent PID 1 check is independent of environment classification: it
-verifies that the helper was launched by the system init process and does not
-decide whether the environment is a container or a VM.
+The environment result is stored as `container=yes` or `container=no`.
+If the result cannot be read or is unavailable, machine-wide operations are
+denied conservatively; this does not prevent required pseudo-filesystem and
+device-filesystem preparation from checking and acting on their actual mount
+state and permissions. The Dinit-parent PID 1 check remains an independent
+startup requirement and is not used as the container classifier.
 
-Machine-id is preserved when already valid and is not generated in containers
-or unknown environments. Hardware-clock setup is skipped in containers and
-unknown environments, or when hwclock is absent. Sysctl settings are read
-from the standard sysctl.d directories with filename precedence; invalid or
-unavailable settings are logged without aborting boot. Module configuration
-is read from the standard modules-load.d configuration directories in
-precedence order; duplicate filenames are shadowed by the first directory,
-and duplicate module names are loaded once. Individual module-load failures
-are logged but do not block boot. Container and unknown-environment module
-loading is skipped.
+Container and non-container policy is applied to root/local fsck, fstab mounts,
+root remounting, swap activation, module loading, hostname changes, sysctl,
+machine-id creation, and hardware-clock access. Loopback and required
+pseudo-filesystem/device setup use their actual operation results rather than
+requiring a particular container runtime name.
 
 ### Root filesystem
 

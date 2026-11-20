@@ -34,21 +34,14 @@
 #include <unistd.h>
 #include <vector>
 
-#if defined(__i386__) || defined(__x86_64__)
-#include <cpuid.h>
-#endif
-
 namespace {
-
-enum class environment_kind { bare_metal, virtual_machine, container, unknown };
 
 struct environment_info {
     bool pid1;
     bool nested_pid_namespace;
     bool pid_namespace_depth_known;
-    environment_kind kind;
+    bool is_container;
     std::string container_name;
-    std::string virtualization;
     bool mountinfo_available;
     std::string root_fs_type;
     std::string procfs;
@@ -135,51 +128,6 @@ std::string detect_container()
     return std::string();
 }
 
-std::string detect_virtual_machine()
-{
-#if defined(__i386__) || defined(__x86_64__)
-    unsigned int eax, ebx, ecx, edx;
-    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & 0x80000000U)) {
-        __cpuid(0x40000000U, eax, ebx, ecx, edx);
-        std::string signature;
-        const unsigned int words[] = { ebx, ecx, edx };
-        for (unsigned int word : words) {
-            for (unsigned int shift = 0; shift < 32; shift += 8)
-                signature.push_back(static_cast<char>((word >> shift) & 0xffU));
-        }
-        if (contains(signature, "KVMKVMKVM")) return "kvm";
-        if (contains(signature, "XenVMMXenVMM")) return "xen";
-        if (contains(signature, "VMwareVMware")) return "vmware";
-        if (contains(signature, "Microsoft Hv")) return "microsoft";
-        if (contains(signature, "TCGTCGTCGTCG")) return "qemu";
-        return "hypervisor";
-    }
-#endif
-
-#if defined(__arm__) || defined(__aarch64__) || defined(__powerpc__) || defined(__powerpc64__) || defined(__riscv)
-    const std::string device_tree_hypervisor =
-            read_file("/proc/device-tree/hypervisor/compatible");
-    if (contains(device_tree_hypervisor, "linux,kvm")) return "kvm";
-    if (contains(device_tree_hypervisor, "xen")) return "xen";
-    if (contains(device_tree_hypervisor, "vmware")) return "vmware";
-    if (!device_tree_hypervisor.empty()) return "hypervisor";
-    const std::string device_tree_compatible = read_file("/proc/device-tree/compatible");
-    if (contains(device_tree_compatible, "qemu")) return "qemu";
-#endif
-
-    // DMI and sysfs are useful fallbacks, but may not be mounted yet.
-    const std::string product = read_file("/sys/class/dmi/id/product_name");
-    const std::string vendor = read_file("/sys/class/dmi/id/sys_vendor");
-    const std::string info = product + vendor;
-    if (contains(info, "KVM") || contains(info, "QEMU")) return "kvm";
-    if (contains(info, "VMware")) return "vmware";
-    if (contains(info, "VirtualBox") || contains(info, "innotek")) return "oracle";
-    if (contains(info, "Microsoft") || contains(info, "Virtual Machine")) return "microsoft";
-    if (contains(info, "Xen")) return "xen";
-    if (contains(info, "Parallels")) return "parallels";
-    const std::string hypervisor = read_file("/sys/hypervisor/type");
-    return hypervisor;
-}
 
 struct mount_info {
     bool available;
@@ -273,7 +221,10 @@ environment_info detect_environment()
     if (info.container_name.empty() && info.pid_namespace_depth_known &&
             info.nested_pid_namespace)
         info.container_name = "other";
-    info.virtualization = detect_virtual_machine();
+    // If namespace inspection is unavailable, choose the conservative
+    // container policy rather than assuming this is the host system.
+    info.is_container = !info.container_name.empty() ||
+            !info.pid_namespace_depth_known;
 
     const mount_info mounts = detect_mounts();
     info.mountinfo_available = mounts.available;
@@ -286,34 +237,7 @@ environment_info detect_environment()
     else if (mounts.cgroup_v2) info.cgroups = "v2";
     else if (mounts.cgroup_v1) info.cgroups = "v1";
     else info.cgroups = "none";
-    // Match systemd's innermost-environment policy: a container inside a VM
-    // is classified as a container, while the outer VM identity is retained.
-    if (!info.container_name.empty()) {
-        info.kind = environment_kind::container;
-    }
-    else if (!info.virtualization.empty()) {
-        info.kind = environment_kind::virtual_machine;
-    }
-    else if (!info.pid_namespace_depth_known) {
-        info.kind = environment_kind::unknown;
-    }
-    else if (info.pid1) {
-        info.kind = environment_kind::bare_metal;
-    }
-    else {
-        info.kind = environment_kind::unknown;
-    }
     return info;
-}
-
-const char *kind_name(environment_kind kind)
-{
-    switch (kind) {
-        case environment_kind::bare_metal: return "bare-metal";
-        case environment_kind::virtual_machine: return "virtual-machine";
-        case environment_kind::container: return "container";
-        default: return "unknown";
-    }
 }
 
 int open_runtime_state_directory()
@@ -422,11 +346,10 @@ bool write_runtime_state_file(const char *name, const std::string &contents)
 bool write_state(const environment_info &info)
 {
     std::ostringstream contents;
-    contents << "kind=" << kind_name(info.kind) << '\n'
+    contents << "container=" << (info.is_container ? "yes" : "no") << '\n'
              << "pid1=" << (info.pid1 ? "yes" : "no") << '\n'
              << "nested-pid-namespace=" << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
-             << "container=" << (info.container_name.empty() ? "none" : info.container_name) << '\n'
-             << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n'
+             << "container-name=" << (info.container_name.empty() ? "unknown" : info.container_name) << '\n'
              << "mountinfo=" << (info.mountinfo_available ? "available" : "unavailable") << '\n'
              << "root-fs=" << (info.root_fs_type.empty() ? "unknown" : info.root_fs_type) << '\n'
              << "procfs=" << (info.mountinfo_available ? (info.procfs == "proc" ? "yes" : "no") : "unknown") << '\n'
@@ -437,14 +360,14 @@ bool write_state(const environment_info &info)
 }
 
 
-environment_kind load_environment_kind()
+bool load_environment_is_container()
 {
     const int directory_fd = open_runtime_state_directory();
-    if (directory_fd < 0) return environment_kind::unknown;
+    if (directory_fd < 0) return true;
     const int fd = openat(directory_fd, "environment",
             O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     close(directory_fd);
-    if (fd < 0) return environment_kind::unknown;
+    if (fd < 0) return true;
 
     std::string contents;
     char buffer[512];
@@ -453,7 +376,7 @@ environment_kind load_environment_kind()
         if (count < 0 && errno == EINTR) continue;
         if (count < 0) {
             close(fd);
-            return environment_kind::unknown;
+            return true;
         }
         if (count == 0) break;
         contents.append(buffer, static_cast<std::string::size_type>(count));
@@ -463,27 +386,23 @@ environment_kind load_environment_kind()
     std::istringstream input(contents);
     std::string line;
     while (std::getline(input, line)) {
-        if (line == "kind=bare-metal") return environment_kind::bare_metal;
-        if (line == "kind=virtual-machine") return environment_kind::virtual_machine;
-        if (line == "kind=container") return environment_kind::container;
+        if (line == "container=yes") return true;
+        if (line == "container=no") return false;
     }
-    return environment_kind::unknown;
+    // An unavailable result must never authorize machine-wide operations.
+    return true;
 }
 
-// Operations that may affect shared kernel or host-level state are permitted
-// only when the environment has been positively classified as a host or VM.
-// Unknown environments are deliberately not treated as bare metal.
+// VM guests are independent Linux systems and follow the non-container path.
 bool environment_allows_machine_operations()
 {
-    const environment_kind kind = load_environment_kind();
-    return kind == environment_kind::bare_metal ||
-            kind == environment_kind::virtual_machine;
+    return !load_environment_is_container();
 }
 
-int mount_failure(environment_kind kind, const char *filesystem,
+int mount_failure(bool is_container, const char *filesystem,
         const char *reason, bool container_may_skip)
 {
-    if (kind == environment_kind::container && container_may_skip) {
+    if (is_container && container_may_skip) {
         std::cerr << "dinit-bootstrap: skipping " << filesystem
                   << " setup in container: " << reason << '\n';
         return 0;
@@ -568,7 +487,7 @@ int ensure_pseudo_filesystem(const char *name)
     const bool container_may_skip = !is_proc && std::strcmp(name, "sys") == 0;
     const char *mountpoint = is_proc ? "/proc" : "/sys";
     const char *filesystem = is_proc ? "proc" : "sysfs";
-    const environment_kind kind = is_proc ? environment_kind::unknown : load_environment_kind();
+    const bool is_container = !is_proc && load_environment_is_container();
 
     if (!ensure_mountpoint_directory(mountpoint)) return 1;
 
@@ -591,7 +510,7 @@ int ensure_pseudo_filesystem(const char *name)
                       << " already mounted as " << filesystem << '\n';
             return 0;
         }
-        return mount_failure(kind, filesystem,
+        return mount_failure(is_container, filesystem,
                 "mountpoint is already occupied by a different filesystem", container_may_skip);
     }
 
@@ -599,7 +518,7 @@ int ensure_pseudo_filesystem(const char *name)
     // directly; do not mistake an existing directory for an existing mount.
     const unsigned long flags = MS_NOSUID | MS_NODEV | MS_NOEXEC;
     const unsigned int max_attempts =
-            (!is_proc && kind != environment_kind::container) ? 2 : 1;
+            (!is_proc && !is_container) ? 2 : 1;
     for (unsigned int attempt = 1; attempt <= max_attempts; ++attempt) {
         if (mount(filesystem, mountpoint, filesystem, flags, nullptr) == 0) {
             std::cout << "dinit-bootstrap: mounted " << filesystem
@@ -624,7 +543,7 @@ int ensure_pseudo_filesystem(const char *name)
         }
         if (attempt == max_attempts) {
             const std::string reason = std::strerror(mount_error);
-            return mount_failure(kind, filesystem, reason.c_str(), container_may_skip);
+            return mount_failure(is_container, filesystem, reason.c_str(), container_may_skip);
         }
         sleep(1);
     }
@@ -669,7 +588,7 @@ int ensure_device_filesystem(const char *mountpoint, const char *filesystem,
         return 1;
     }
 
-    const environment_kind kind = load_environment_kind();
+    const bool is_container = load_environment_is_container();
     if (mount(filesystem, mountpoint, filesystem, flags, options) == 0) {
         std::cout << "dinit-bootstrap: mounted " << filesystem
                   << " on " << mountpoint << '\n';
@@ -693,7 +612,7 @@ int ensure_device_filesystem(const char *mountpoint, const char *filesystem,
                   << mountpoint << " cannot be determined\n";
         return 1;
     }
-    return mount_failure(kind, filesystem, std::strerror(mount_error),
+    return mount_failure(is_container, filesystem, std::strerror(mount_error),
             container_may_skip);
 }
 
@@ -1812,7 +1731,7 @@ int run_detect(bool stay)
     }
 
     const environment_info info = detect_environment();
-    std::cout << "dinit-bootstrap: environment: " << kind_name(info.kind) << '\n'
+    std::cout << "dinit-bootstrap: environment: " << (info.is_container ? "container" : "non-container") << '\n'
               << "dinit-bootstrap: Dinit parent is PID 1: " << (info.pid1 ? "yes" : "no") << '\n'
               << "dinit-bootstrap: nested PID namespace: "
               << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
@@ -1825,8 +1744,6 @@ int run_detect(bool stay)
               << "dinit-bootstrap: cgroups: " << info.cgroups << '\n';
     if (!info.container_name.empty())
         std::cout << "dinit-bootstrap: container: " << info.container_name << '\n';
-    if (!info.virtualization.empty())
-        std::cout << "dinit-bootstrap: virtualization: " << info.virtualization << '\n';
 
     if (!info.pid1) {
         std::cerr << "dinit-bootstrap: refusing system bootstrap: helper parent is not PID 1\n";
