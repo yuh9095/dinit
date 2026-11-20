@@ -54,10 +54,10 @@ shell script:
 9. `network.target` waits for distribution-selected network services;
    `multi-user.target` combines local and network readiness.
 
-The root check depends on `early-devices.target`, not
-`early-fs-pre.target`. This lets the device-preparation stage finish before the
-root check without making root fsck wait for optional integrations intended
-for non-root local filesystems.
+The root check has a milestone dependency on `early-devices.target`, not
+`early-fs-pre.target`. Device preparation must succeed before root fsck can
+run, while optional integrations intended only for non-root local filesystems
+do not delay the root check.
 
 ## Filesystem operations
 
@@ -90,8 +90,10 @@ confirmed read-only and backed by the matching block device. When a root operati
 treated as ambiguous and cause that operation to fail rather than selecting
 one arbitrarily.
 
-The helper accepts fsck status 0 (clean) and 1 (errors corrected). The fsck status bits for reboot-required (2) and uncorrected errors (4) are
-reported distinctly and fail the root-fsck milestone. Only a normal fsck process
+The helper accepts fsck status 0 (clean) and 1 (errors corrected). The fsck
+status bits for reboot-required (2) and uncorrected errors (4) are reported
+independently, including when combined with operational or usage error bits,
+and fail the root-fsck milestone. Only a normal fsck process
 exit is interpreted as an fsck bitmask; an execution failure or signal
 termination is reported separately and cannot be mistaken for an fsck status.
 Failed attempts are recorded atomically in `/run/dinit/root-fsck.status` for a

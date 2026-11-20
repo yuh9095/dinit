@@ -689,6 +689,27 @@ int execute_program(const std::vector<std::string> &arguments, bool optional,
     return 1;
 }
 
+bool clear_root_fsck_status()
+{
+    struct stat directory_stat;
+    if (lstat("/run/dinit", &directory_stat) != 0) {
+        if (errno == ENOENT) return true;
+        std::cerr << "dinit-bootstrap: cannot inspect /run/dinit: "
+                  << std::strerror(errno) << '\n';
+        return false;
+    }
+    if (!S_ISDIR(directory_stat.st_mode)) {
+        std::cerr << "dinit-bootstrap: /run/dinit is not a real directory\n";
+        return false;
+    }
+    if (unlink("/run/dinit/root-fsck.status") != 0 && errno != ENOENT) {
+        std::cerr << "dinit-bootstrap: cannot clear previous root fsck status: "
+                  << std::strerror(errno) << '\n';
+        return false;
+    }
+    return true;
+}
+
 bool write_root_fsck_status(const std::string &contents)
 {
     if (mkdir("/run/dinit", 0755) != 0 && errno != EEXIST) {
@@ -697,25 +718,46 @@ bool write_root_fsck_status(const std::string &contents)
         return false;
     }
     struct stat directory_stat;
-    if (stat("/run/dinit", &directory_stat) != 0 || !S_ISDIR(directory_stat.st_mode)) {
-        std::cerr << "dinit-bootstrap: /run/dinit is not a directory\n";
+    if (lstat("/run/dinit", &directory_stat) != 0 || !S_ISDIR(directory_stat.st_mode)) {
+        std::cerr << "dinit-bootstrap: /run/dinit is not a real directory\n";
         return false;
     }
+
     std::ostringstream temporary_name;
     temporary_name << "/run/dinit/root-fsck.status.tmp." << getpid();
     const std::string temporary = temporary_name.str();
-    std::ofstream output(temporary.c_str());
-    if (!output) {
-        std::cerr << "dinit-bootstrap: cannot write root fsck status file\n";
+    const int fd = open(temporary.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        std::cerr << "dinit-bootstrap: cannot create temporary root fsck status: "
+                  << std::strerror(errno) << '\n';
         return false;
     }
-    output << contents;
-    output.close();
-    if (!output.good()) {
+
+    bool write_ok = true;
+    std::string::size_type offset = 0;
+    while (offset < contents.size()) {
+        const ssize_t written = write(fd, contents.data() + offset,
+                contents.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            write_ok = false;
+            break;
+        }
+        offset += static_cast<std::string::size_type>(written);
+    }
+    const int write_error = write_ok ? 0 : errno;
+    if (close(fd) != 0 && write_ok) {
+        write_ok = false;
+    }
+    if (!write_ok) {
+        const int saved_errno = write_error != 0 ? write_error : errno;
         unlink(temporary.c_str());
-        std::cerr << "dinit-bootstrap: failed writing root fsck status file\n";
+        std::cerr << "dinit-bootstrap: failed writing root fsck status: "
+                  << std::strerror(saved_errno) << '\n';
         return false;
     }
+
     if (rename(temporary.c_str(), "/run/dinit/root-fsck.status") != 0) {
         const int saved_errno = errno;
         unlink(temporary.c_str());
@@ -818,7 +860,7 @@ bool read_root_fstab_info(root_fstab_info &info)
 
 int run_root_fsck()
 {
-    (void) unlink("/run/dinit/root-fsck.status");
+    if (!clear_root_fsck_status()) return 1;
     if (load_environment_kind() == environment_kind::container) {
         std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
         return 0;
@@ -945,26 +987,18 @@ int run_root_fsck()
           << "uncorrected_errors=" << ((result & 4) ? "yes" : "no") << '\n';
     (void) write_root_fsck_status(state.str());
 
-    // fsck uses a bitmask, not a simple success/failure status. Preserve the
-    // two recovery-critical conditions in diagnostics even though this helper
-    // currently reports both as a failed milestone to Dinit.
-    if ((result & ~7) != 0) {
-        std::cerr << "dinit-bootstrap: root fsck failed with an operational or usage error"
-                  << " (status " << result << ")\n";
-    }
-    else if ((result & 2) != 0) {
-        std::cerr << "dinit-bootstrap: root fsck requests a system reboot";
-        if ((result & 4) != 0)
-            std::cerr << " and reports uncorrected filesystem errors";
-        std::cerr << " (status " << result << ")\n";
-    }
-    else if ((result & 4) != 0) {
-        std::cerr << "dinit-bootstrap: root fsck left filesystem errors uncorrected"
-                  << " (status " << result << ")\n";
-    }
-    else {
-        std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")\n";
-    }
+    // fsck status is a bitmask: report every set condition independently,
+    // since operational errors can be combined with recovery-critical bits.
+    std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")";
+    if ((result & 2) != 0)
+        std::cerr << "; a system reboot is required";
+    if ((result & 4) != 0)
+        std::cerr << "; filesystem errors remain uncorrected";
+    if ((result & 1) != 0)
+        std::cerr << "; errors were corrected";
+    if ((result & ~7) != 0)
+        std::cerr << "; operational, usage, cancellation, or shared-library error bits are set";
+    std::cerr << '\n';
     return 1;
 }
 
