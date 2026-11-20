@@ -81,26 +81,26 @@ int main(int argc, char **argv)
     const std::string environment =
         "type = process\ncommand = " + helper_path + " detect --stay\n"
         "ready-notification = pipefd:4\nrestart = false\n"
-        "depends-on: bootstrap-proc\n";
+        "depends-ms: bootstrap-proc\n";
     const std::string proc =
         "type = scripted\ncommand = " + helper_path + " mount-pseudo proc\nrestart = false\n";
     const std::string sys =
         "type = scripted\ncommand = " + helper_path + " mount-pseudo sys\nrestart = false\n"
-        "depends-on: bootstrap-environment\n";
+        "depends-ms: bootstrap-environment\n";
     const std::string dev =
         "type = scripted\ncommand = " + helper_path + " mount-dev\nrestart = false\n"
-        "depends-on: bootstrap-environment\n";
+        "depends-ms: bootstrap-environment\n";
     const std::string devpts =
         "type = scripted\ncommand = " + helper_path + " mount-devpts\nrestart = false\n"
-        "depends-on: bootstrap-dev\n";
+        "depends-ms: bootstrap-dev\n";
     const std::string shm =
         "type = scripted\ncommand = " + helper_path + " mount-shm\nrestart = false\n"
-        "depends-on: bootstrap-dev\n";
+        "depends-ms: bootstrap-dev\n";
     const std::string pseudofs =
-        "type = internal\ndepends-on: bootstrap-proc\ndepends-on: bootstrap-sys\n"
-        "depends-on: bootstrap-devpts\ndepends-on: bootstrap-shm\n";
+        "type = internal\ndepends-ms: bootstrap-proc\ndepends-ms: bootstrap-sys\n"
+        "depends-ms: bootstrap-devpts\ndepends-ms: bootstrap-shm\n";
     const std::string early_prepare =
-        "type = internal\ndepends-on: pseudofs\n";
+        "type = internal\ndepends-ms: pseudofs\n";
     const std::string root_fsck =
         "type = scripted\ncommand = " + helper_path + " fsck-root\nrestart = false\n"
         "depends-ms: early-devices.target\n";
@@ -109,24 +109,24 @@ int main(int argc, char **argv)
         "depends-ms: early-root-fsck\n";
     const std::string modules =
         "type = scripted\ncommand = " + helper_path + " modules-load\nrestart = false\n"
-        "depends-on: early-prepare.target\n";
+        "depends-ms: early-prepare.target\n";
     const std::string hostname =
         "type = scripted\ncommand = " + helper_path + " set-hostname\nrestart = false\n"
-        "depends-on: early-prepare.target\n";
+        "depends-ms: early-prepare.target\n";
     const std::string sysctl =
         "type = scripted\ncommand = " + helper_path + " sysctl-load\nrestart = false\n"
         "depends-on: early-net-lo\ndepends-on: early-hostname\n";
     const std::string loopback =
         "type = scripted\ncommand = " + helper_path + " loopback-up\nrestart = false\n"
-        "depends-on: early-devices.target\n";
+        "depends-ms: early-devices.target\n";
     const std::string hwclock =
         "type = scripted\ncommand = " + helper_path + " hwclock\nrestart = false\n"
-        "depends-on: early-prepare.target\n";
+        "depends-ms: early-prepare.target\n";
     const std::string machine_id =
         "type = scripted\ncommand = " + helper_path + " machine-id\nrestart = false\n"
         "depends-ms: early-root-rw.target\n";
     const std::string devd =
-        "type = internal\ndepends-on: early-modules\n"
+        "type = internal\ndepends-ms: early-modules\n"
         "depends-ms.d: " + quote_dinit_value(generic_service_dir + "/early-devices.d") + "\n";
     const std::string devices =
         "type = internal\ndepends-ms: early-devd\n";
@@ -154,7 +154,7 @@ int main(int argc, char **argv)
     const std::string local =
         "type = internal\ndepends-ms: pre-local.target\n";
     const std::string network =
-        "type = internal\ndepends-on: early-net-lo\nwaits-for.d: " + quote_dinit_value(generic_service_dir + "/network.d") + "\n";
+        "type = internal\ndepends-ms: early-net-lo\nwaits-for.d: " + quote_dinit_value(generic_service_dir + "/network.d") + "\n";
     const std::string multi_user =
         "type = internal\ndepends-on: local.target\ndepends-on: network.target\n";
 

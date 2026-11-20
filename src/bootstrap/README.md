@@ -34,11 +34,16 @@ shell script:
 
 1. `bootstrap-proc`, `bootstrap-environment`, `bootstrap-sys`,
    `bootstrap-dev`, `bootstrap-devpts` and `bootstrap-shm` prepare the
-   required pseudo-filesystems and device filesystem.
-2. `early-prepare.target` aggregates that preparation stage.
-3. `early-modules` loads configured kernel modules when `modprobe` is available.
-4. `early-devd` provides the distribution device-manager integration point;
-   enabled services in `early-devices.d` are required to start successfully.
+   required pseudo-filesystems and device filesystem. Each required step uses
+   a milestone dependency on its prerequisite, so a failed mount cannot be
+   bypassed by later bootstrap stages.
+2. `early-prepare.target` aggregates that preparation stage using milestone
+   dependencies.
+3. `early-modules` runs after the required preparation stage. Missing
+   `modprobe` and individual module-load failures remain non-fatal.
+4. `early-devd` runs after the module-loading stage and provides the distribution
+   device-manager integration point; enabled services in `early-devices.d` are
+   required to start successfully.
 5. `early-devices.target` marks device preparation complete only after
    `early-devd` succeeds.
 6. After `early-devices.target`, the root-filesystem path and the non-root
