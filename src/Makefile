@@ -16,6 +16,35 @@ objects = $(dinit_objects) dinitctl.o dinit-check.o shutdown.o dinit-monitor.o d
 
 all: dinit dinitctl dinit-check dinit-monitor $(SHUTDOWN)
 
+.PHONY: all check check-igr run-cppcheck install clean
+
+ifeq ($(ENABLE_BOOTSTRAP),yes)
+all: bootstrap
+CXX_FOR_BUILD ?= c++
+CPPFLAGS_FOR_BUILD ?=
+CXXFLAGS_FOR_BUILD ?= -O2
+LDFLAGS_FOR_BUILD ?=
+
+.PHONY: bootstrap bootstrap-generated check-bootstrap
+bootstrap: dinit-bootstrap bootstrap-generated
+
+dinit-bootstrap: bootstrap/runtime.cc bootstrap/mountinfo.cc bootstrap/mountinfo.h
+	$(CXX) $(ALL_CXXFLAGS) -std=c++11 -Ibootstrap -o $@ bootstrap/runtime.cc bootstrap/mountinfo.cc $(ALL_LDFLAGS)
+
+bootstrap/mountinfo-tests: bootstrap/mountinfo-tests.cc bootstrap/mountinfo.cc bootstrap/mountinfo.h
+	$(CXX) $(ALL_CXXFLAGS) -std=c++11 -Ibootstrap -o $@ bootstrap/mountinfo-tests.cc bootstrap/mountinfo.cc $(ALL_LDFLAGS)
+
+check-bootstrap: bootstrap/mountinfo-tests
+	./bootstrap/mountinfo-tests
+
+dinit-bootstrap-gen: bootstrap/generate.cc
+	$(CXX_FOR_BUILD) $(CPPFLAGS_FOR_BUILD) $(CXXFLAGS_FOR_BUILD) -std=c++11 -o $@ $< $(LDFLAGS_FOR_BUILD)
+
+bootstrap-generated: dinit-bootstrap-gen
+	rm -rf bootstrap-generated
+	./dinit-bootstrap-gen bootstrap-generated $(BOOTSTRAP_LIBDIR)/dinit-bootstrap $(BOOTSTRAP_GENERIC_SERVICEDIR)
+endif
+
 ../mconfig:
 	@echo "*** No mconfig, please run make from top level"
 	@false
@@ -60,10 +89,26 @@ ifeq ($(BUILD_SHUTDOWN),yes)
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)soft-reboot
 	ln -sf $(SHUTDOWN) $(DESTDIR)$(SBINDIR)/$(SHUTDOWN_PREFIX)poweroff
 endif
+ifeq ($(ENABLE_BOOTSTRAP),yes)
+	install -d $(DESTDIR)$(BOOTSTRAP_LIBDIR) $(DESTDIR)$(BOOTSTRAP_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR) $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/boot-required.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-fs-pre.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/early-devices.d $(DESTDIR)$(BOOTSTRAP_GENERIC_SERVICEDIR)/network.d
+	install $(STRIPOPTS) dinit-bootstrap $(DESTDIR)$(BOOTSTRAP_LIBDIR)/dinit-bootstrap
+	install -m 0644 bootstrap-generated/early/* $(DESTDIR)$(BOOTSTRAP_SERVICEDIR)/
+	@set -e; generic_dir="$(DESTDIR)"$(BOOTSTRAP_GENERIC_SERVICEDIR); for file in bootstrap-generated/generic/* bootstrap-generated/generic/boot.d/* bootstrap-generated/generic/boot-required.d/*; do \
+	  test -f "$$file" || continue; \
+	  case "$$file" in \
+	    bootstrap-generated/generic/boot.d/*) dest="$$generic_dir/boot.d/$${file##*/}" ;; \
+	    bootstrap-generated/generic/boot-required.d/*) dest="$$generic_dir/boot-required.d/$${file##*/}" ;; \
+	    *) dest="$$generic_dir/$${file##*/}" ;; \
+	  esac; \
+	  if test ! -e "$$dest"; then install -m 0644 "$$file" "$$dest"; \
+	  elif ! cmp -s "$$file" "$$dest"; then install -m 0644 "$$file" "$$dest.dinit-new"; fi; \
+	done
+endif
 
 clean:
 	rm -f *.o *.d
-	rm -f dinit dinitctl dinit-check $(SHUTDOWN_PREFIX)shutdown dinit-monitor
+	rm -f dinit dinitctl dinit-check $(SHUTDOWN_PREFIX)shutdown dinit-monitor dinit-bootstrap dinit-bootstrap-gen bootstrap/mountinfo-tests
+	rm -rf bootstrap-generated
 	$(MAKE) -C tests clean
 	$(MAKE) -C igr-tests clean
 

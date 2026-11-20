@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - master
+      - main
+      - bootstrap/**
     paths:
       - '.github/workflows/regular_ci.yml'
       - 'configure'
@@ -18,6 +20,7 @@ on:
   pull_request:
     branches:
       - master
+      - main
     paths:
       - '.github/workflows/regular_ci.yml'
       - 'configure'
@@ -144,6 +147,95 @@ jobs:
       with:
           name: igr-tests_output
           path: src/igr-tests/*/output/*
+
+  Linux_Bootstrap_build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:bookworm
+            family: debian
+          - image: alpine:latest
+            family: alpine
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Getting dependencies (Debian)
+      if: ${{ matrix.family == 'debian' }}
+      run: |
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y g++ make m4 libcap-dev
+    - name: Getting dependencies (Alpine)
+      if: ${{ matrix.family == 'alpine' }}
+      run: |
+        apk update
+        apk add make g++ m4 libcap-dev
+    - name: Configure Linux Bootstrap
+      run: ./configure --enable-bootstrap
+    - name: Build Dinit and Linux Bootstrap
+      run: make -j2
+    - name: Test Linux Bootstrap mountinfo parser
+      run: make -C src check-bootstrap
+    - name: Prepare Bootstrap helper for service graph validation
+      run: |
+        mkdir -p /usr/lib/dinit
+        install -m 0755 src/dinit-bootstrap /usr/lib/dinit/dinit-bootstrap
+    - name: Check generated Dinit service graph
+      run: |
+        mkdir -p /etc/dinit.d/boot.d /etc/dinit.d/early-fs-pre.d
+        mkdir -p /etc/dinit.d/early-devices.d /etc/dinit.d/network.d
+        ./src/dinit-check --system \
+          --services-dir "$PWD/src/bootstrap-generated/early" \
+          --services-dir "$PWD/src/bootstrap-generated/generic" \
+          multi-user.target
+    - name: Test installation layout
+      run: |
+        make install DESTDIR=/tmp/dinit-bootstrap-install
+        test -x /tmp/dinit-bootstrap-install/usr/lib/dinit/dinit-bootstrap
+        test -f /tmp/dinit-bootstrap-install/usr/lib/dinit.d/bootstrap-proc
+        test -f /tmp/dinit-bootstrap-install/etc/dinit.d/multi-user.target
+        test -f /tmp/dinit-bootstrap-install/etc/dinit.d/boot.d/pre-local.target
+        test -f /tmp/dinit-bootstrap-install/etc/dinit.d/boot-required.d/early-root-rw.target
+    - name: Verify Bootstrap dependency stages
+      run: |
+        early=src/bootstrap-generated/early
+        generic=src/bootstrap-generated/generic
+        test -f "$generic/boot.d/pre-local.target"
+        test -f "$generic/boot-required.d/early-root-rw.target"
+        grep -Fxq 'depends-ms: early-devices.target' "$early/early-root-fsck"
+        ! grep -Fxq 'depends-on: early-fs-pre.target' "$early/early-root-fsck"
+        grep -Fxq 'depends-ms: early-devices.target' "$early/early-fs-pre.target"
+        grep -Fxq 'depends-ms: early-fs-pre.target' "$early/early-fs-fsck"
+        grep -Fxq 'depends-ms: bootstrap-proc' "$early/bootstrap-environment"
+        grep -Fxq 'depends-ms: bootstrap-environment' "$early/bootstrap-sys"
+        grep -Fxq 'depends-ms: bootstrap-environment' "$early/bootstrap-dev"
+        grep -Fxq 'depends-ms: bootstrap-dev' "$early/bootstrap-devpts"
+        grep -Fxq 'depends-ms: bootstrap-dev' "$early/bootstrap-shm"
+        grep -Fxq 'depends-ms: bootstrap-proc' "$early/pseudofs"
+        grep -Fxq 'depends-ms: bootstrap-sys' "$early/pseudofs"
+        grep -Fxq 'depends-ms: bootstrap-devpts' "$early/pseudofs"
+        grep -Fxq 'depends-ms: bootstrap-shm' "$early/pseudofs"
+        grep -Fxq 'depends-ms: pseudofs' "$early/early-prepare.target"
+        grep -Fxq 'depends-ms: early-prepare.target' "$early/early-modules"
+        grep -Fxq 'depends-ms: early-modules' "$early/early-devd"
+        grep -Fxq 'depends-ms: early-prepare.target' "$generic/early-hostname"
+        grep -Fxq 'depends-ms: early-prepare.target' "$generic/early-hwclock"
+        grep -Fxq 'depends-ms: early-devices.target' "$generic/early-net-lo"
+        grep -Fxq 'depends-ms: early-devd' "$early/early-devices.target"
+        grep -Fxq 'depends-ms: early-devices.target' "$early/early-fs-pre.target"
+        grep -Fxq 'depends-ms: early-fs-pre.target' "$early/early-fs-fsck"
+        grep -Fxq 'depends-ms: early-fs-pre.target' "$early/early-fs-fstab.target"
+        grep -Fxq 'depends-ms: early-fs-fsck' "$early/early-fs-fstab.target"
+        grep -Fxq 'depends-ms: early-fs-fstab.target' "$early/early-fs-local.target"
+        grep -Fxq 'depends-ms: early-fs-local.target' "$generic/local-fs.target"
+        grep -Fxq 'depends-ms: local-fs.target' "$generic/pre-local.target"
+        grep -Fxq 'depends-ms: pre-local.target' "$generic/local.target"
+        grep -Fq 'depends-ms.d:' "$early/early-devd"
+        grep -Fq 'depends-ms.d:' "$early/early-fs-pre.target"
+        grep -Fq 'waits-for.d:' "$generic/network.target"
 
   BSD_build:
     runs-on: ubuntu-latest
