@@ -44,9 +44,9 @@ shell script:
    `multi-user.target` combines local and network readiness.
 
 The root check depends on `early-devices.target`, not
-`early-fs-pre.target`. This allows root-device preparation to complete first
-without making root fsck wait for optional integrations intended for other
-local filesystems.
+`early-fs-pre.target`. This lets the device-preparation stage finish before the
+root check without making root fsck wait for optional integrations intended
+for non-root local filesystems.
 
 ## Filesystem operations
 
@@ -74,9 +74,9 @@ and when the root is virtual, already read-write, not explicitly mounted
 read-only, or cannot be matched safely to its backing block device. It also
 skips when the required `fsck` frontend or `fsck.TYPE` helper is unavailable.
 It only invokes fsck when the fstab requests a check and the mounted root is
-confirmed read-only and backed by the matching block device. Multiple root
-entries in fstab are treated as ambiguous and cause the operation to fail
-rather than selecting one arbitrarily.
+confirmed read-only and backed by the matching block device. When a root operation needs to consult fstab, multiple root entries are
+treated as ambiguous and cause that operation to fail rather than selecting
+one arbitrarily.
 
 After the root-fsck milestone, `early-root-rw.target` remounts root read-write
 only when fstab contains a root entry whose options do not specify `ro`.
@@ -114,8 +114,11 @@ whereas `waits-for` dependencies do not.
 
 An extension service must not depend on the target that loads it from its
 drop-in directory. For example, a service in `early-devices.d` must not depend
-on `early-devices.target`; doing so creates a dependency cycle. No particular
-device, storage or network manager is selected by the generic package.
+on `early-devices.target`; doing so creates a dependency cycle. The
+`early-devices.d` stage runs after Dinit has started on the mounted root, so it
+is not a mechanism for assembling devices required to mount the root
+filesystem. No particular device, storage or network manager is selected by
+the generic package.
 Distributions opt in by adding the relevant service names to these directories.
 
 ## Compatibility
