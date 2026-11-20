@@ -896,14 +896,21 @@ int run_root_rw()
         std::cerr << "dinit-bootstrap: cannot inspect root mount options\n";
         return 1;
     }
+    bool root_found = false;
     bool root_is_rw = false;
     struct mntent *entry;
     while ((entry = getmntent(mounts)) != nullptr) {
         if (std::strcmp(entry->mnt_dir, "/") == 0) {
-            root_is_rw = hasmntopt(entry, "rw") != nullptr; break;
+            root_found = true;
+            root_is_rw = hasmntopt(entry, "rw") != nullptr;
+            break;
         }
     }
     endmntent(mounts);
+    if (!root_found) {
+        std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing remount\\n";
+        return 1;
+    }
     if (root_is_rw) {
         std::cout << "dinit-bootstrap: root filesystem is already read-write\n";
         return 0;
