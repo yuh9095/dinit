@@ -69,6 +69,24 @@ do not delay the root check.
 
 ## Filesystem operations
 
+The helper reads `/proc/self/mountinfo` through a dedicated parser. It
+validates the complete snapshot, decodes escaped mount paths, and uses mount
+IDs and parent IDs to distinguish stacked mounts and mounts hidden by an
+overmounted ancestor. If the visible mount state cannot be determined, the
+helper does not treat that state as an unmounted directory.
+
+The existing runtime-provided `/dev` mount is accepted without requiring
+devtmpfs. `/dev/pts`, however, must be devpts: a different filesystem type
+is reported as a conflict, and a failed devpts mount is never silently skipped
+in a container. After preparation, the helper performs a real PTY allocation
+test through `/dev/ptmx`, including opening the allocated slave. This checks
+functionality without requiring `/dev/ptmx` to be a symlink; traditional
+character-device layouts are accepted when they work.
+
+The mountinfo parser's unprivileged fixture tests can be run with
+`make -C src check-bootstrap` after configuring with
+`./configure --enable-bootstrap`.
+
 The C++ helper applies machine-id, hostname, sysctl and loopback settings
 directly, and invokes hwclock, modprobe, fsck, mount and swapon with argv; it
 does not use a shell. Machine-id is preserved when already valid and is never

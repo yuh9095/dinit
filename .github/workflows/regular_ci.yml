@@ -177,6 +177,8 @@ jobs:
       run: ./configure --enable-bootstrap
     - name: Build Dinit and Linux Bootstrap
       run: make -j2
+    - name: Test Linux Bootstrap mountinfo parser
+      run: make -C src check-bootstrap
     - name: Prepare Bootstrap helper for service graph validation
       run: |
         mkdir -p /usr/lib/dinit

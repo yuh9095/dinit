@@ -9,8 +9,10 @@
 #include <signal.h>
 #include <cstdio>
 #include <cstdlib>
+#include <stdlib.h>
 #include <cstring>
 #include <fcntl.h>
+#include "mountinfo.h"
 #include <mntent.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -183,46 +185,51 @@ struct mount_info {
     std::string devfs;
     bool cgroup_v1;
     bool cgroup_v2;
-
-    mount_info() : available(false), cgroup_v1(false), cgroup_v2(false) {}
+    bool proc_ambiguous;
+    bool sys_ambiguous;
+    bool cgroups_ambiguous;
+    mount_info() : available(false), cgroup_v1(false), cgroup_v2(false),
+            proc_ambiguous(false), sys_ambiguous(false),
+            cgroups_ambiguous(false) {}
 };
 
 mount_info detect_mounts()
 {
     mount_info info;
-    std::ifstream input("/proc/self/mountinfo");
-    if (!input) return info;
+    dinit_bootstrap::mount_table table;
+    if (!dinit_bootstrap::read_mountinfo("/proc/self/mountinfo", table))
+        return info;
     info.available = true;
+    const dinit_bootstrap::mount_result root = dinit_bootstrap::find_visible_mount(table, "/");
+    const dinit_bootstrap::mount_result proc = dinit_bootstrap::find_visible_mount(table, "/proc");
+    const dinit_bootstrap::mount_result sys = dinit_bootstrap::find_visible_mount(table, "/sys");
+    const dinit_bootstrap::mount_result dev = dinit_bootstrap::find_visible_mount(table, "/dev");
+    if (root.state == dinit_bootstrap::mount_state::mounted) info.root_fs_type = root.entry.filesystem;
+    if (proc.state == dinit_bootstrap::mount_state::mounted) info.procfs = proc.entry.filesystem;
+    if (sys.state == dinit_bootstrap::mount_state::mounted) info.sysfs = sys.entry.filesystem;
+    if (dev.state == dinit_bootstrap::mount_state::mounted) info.devfs = dev.entry.filesystem;
+    info.proc_ambiguous = proc.state == dinit_bootstrap::mount_state::ambiguous;
+    info.sys_ambiguous = sys.state == dinit_bootstrap::mount_state::ambiguous;
 
-    std::string line;
-    while (std::getline(input, line)) {
-        std::istringstream fields(line);
-        std::string id, parent, device, root, mountpoint, options, field;
-        if (!(fields >> id >> parent >> device >> root >> mountpoint >> options))
-            continue;
-
-        while (fields >> field && field != "-") {}
-        std::string filesystem;
-        std::string source;
-        std::string super_options;
-        if (field != "-" || !(fields >> filesystem >> source >> super_options))
-            continue;
-
-        if (mountpoint == "/") info.root_fs_type = filesystem;
-        else if (mountpoint == "/proc") info.procfs = filesystem;
-        else if (mountpoint == "/sys") info.sysfs = filesystem;
-        else if (mountpoint == "/dev") info.devfs = filesystem;
-
-        if (mountpoint == "/sys/fs/cgroup"
-                || mountpoint.compare(0, 15, "/sys/fs/cgroup/") == 0) {
-            if (filesystem == "cgroup") info.cgroup_v1 = true;
-            else if (filesystem == "cgroup2") info.cgroup_v2 = true;
+    std::set<std::string> paths;
+    for (std::vector<dinit_bootstrap::mount_entry>::const_iterator i = table.entries.begin();
+            i != table.entries.end(); ++i) {
+        if (i->mountpoint == "/sys/fs/cgroup"
+                || i->mountpoint.compare(0, 15, "/sys/fs/cgroup/") == 0)
+            paths.insert(i->mountpoint);
+    }
+    for (std::set<std::string>::const_iterator i = paths.begin(); i != paths.end(); ++i) {
+        const dinit_bootstrap::mount_result result = dinit_bootstrap::find_visible_mount(table, *i);
+        if (result.state == dinit_bootstrap::mount_state::ambiguous) {
+            info.cgroups_ambiguous = true;
+        }
+        else if (result.state == dinit_bootstrap::mount_state::mounted) {
+            if (result.entry.filesystem == "cgroup") info.cgroup_v1 = true;
+            else if (result.entry.filesystem == "cgroup2") info.cgroup_v2 = true;
         }
     }
-
     return info;
 }
-
 
 environment_info detect_environment()
 {
@@ -252,7 +259,7 @@ environment_info detect_environment()
     info.procfs = mounts.procfs;
     info.sysfs = mounts.sysfs;
     info.devfs = mounts.devfs;
-    if (!mounts.available) info.cgroups = "unknown";
+    if (!mounts.available || mounts.cgroups_ambiguous) info.cgroups = "unknown";
     else if (mounts.cgroup_v1 && mounts.cgroup_v2) info.cgroups = "hybrid";
     else if (mounts.cgroup_v2) info.cgroups = "v2";
     else if (mounts.cgroup_v1) info.cgroups = "v1";
@@ -287,39 +294,151 @@ const char *kind_name(environment_kind kind)
     }
 }
 
-bool write_state(const environment_info &info)
+int open_runtime_state_directory()
 {
-    if (mkdir("/run", 0755) != 0 && errno != EEXIST) {
-        std::cerr << "dinit-bootstrap: cannot create /run: " << std::strerror(errno) << '\n';
-        return false;
+    const int root_fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (root_fd < 0) return -1;
+
+    if (mkdirat(root_fd, "run", 0755) != 0 && errno != EEXIST) {
+        const int saved_errno = errno;
+        close(root_fd);
+        errno = saved_errno;
+        return -1;
     }
-    if (mkdir("/run/dinit", 0755) != 0 && errno != EEXIST) {
-        std::cerr << "dinit-bootstrap: cannot create /run/dinit: "
+    const int run_fd = openat(root_fd, "run",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const int run_error = errno;
+    close(root_fd);
+    if (run_fd < 0) {
+        errno = run_error;
+        return -1;
+    }
+
+    if (mkdirat(run_fd, "dinit", 0755) != 0 && errno != EEXIST) {
+        const int saved_errno = errno;
+        close(run_fd);
+        errno = saved_errno;
+        return -1;
+    }
+    const int state_fd = openat(run_fd, "dinit",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const int state_error = errno;
+    close(run_fd);
+    if (state_fd < 0) {
+        errno = state_error;
+        return -1;
+    }
+    return state_fd;
+}
+
+bool write_runtime_state_file(const char *name, const std::string &contents)
+{
+    const int directory_fd = open_runtime_state_directory();
+    if (directory_fd < 0) {
+        std::cerr << "dinit-bootstrap: cannot safely open /run/dinit: "
                   << std::strerror(errno) << '\n';
         return false;
     }
-    std::ofstream output("/run/dinit/environment");
-    if (!output) {
-        std::cerr << "dinit-bootstrap: cannot write /run/dinit/environment\n";
+
+    std::ostringstream temporary_name;
+    temporary_name << name << ".tmp." << getpid();
+    const std::string temporary = temporary_name.str();
+    const int fd = openat(directory_fd, temporary.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        const int saved_errno = errno;
+        close(directory_fd);
+        std::cerr << "dinit-bootstrap: cannot create temporary " << name
+                  << ": " << std::strerror(saved_errno) << '\n';
         return false;
     }
-    output << "kind=" << kind_name(info.kind) << '\n'
-           << "pid1=" << (info.pid1 ? "yes" : "no") << '\n'
-           << "nested-pid-namespace=" << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
-           << "container=" << (info.container_name.empty() ? "none" : info.container_name) << '\n'
-           << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n'
-           << "mountinfo=" << (info.mountinfo_available ? "available" : "unavailable") << '\n'
-           << "root-fs=" << (info.root_fs_type.empty() ? "unknown" : info.root_fs_type) << '\n'
-           << "procfs=" << (info.mountinfo_available ? (info.procfs == "proc" ? "yes" : "no") : "unknown") << '\n'
-           << "sysfs=" << (info.mountinfo_available ? (info.sysfs == "sysfs" ? "yes" : "no") : "unknown") << '\n'
-           << "devfs=" << (info.devfs.empty() ? (info.mountinfo_available ? "no" : "unknown") : info.devfs) << '\n'
-           << "cgroups=" << info.cgroups << '\n';
-    return output.good();
+
+    bool write_ok = true;
+    std::string::size_type offset = 0;
+    while (offset < contents.size()) {
+        const ssize_t written = write(fd, contents.data() + offset,
+                contents.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            if (written == 0) errno = EIO;
+            write_ok = false;
+            break;
+        }
+        offset += static_cast<std::string::size_type>(written);
+    }
+    const int write_error = write_ok ? 0 : errno;
+    if (close(fd) != 0 && write_ok) write_ok = false;
+    if (!write_ok) {
+        const int saved_errno = write_error != 0 ? write_error : errno;
+        unlinkat(directory_fd, temporary.c_str(), 0);
+        close(directory_fd);
+        std::cerr << "dinit-bootstrap: failed writing " << name
+                  << ": " << std::strerror(saved_errno) << '\n';
+        return false;
+    }
+
+    if (renameat(directory_fd, temporary.c_str(),
+                directory_fd, name) != 0) {
+        const int saved_errno = errno;
+        unlinkat(directory_fd, temporary.c_str(), 0);
+        close(directory_fd);
+        std::cerr << "dinit-bootstrap: cannot publish " << name
+                  << ": " << std::strerror(saved_errno) << '\n';
+        return false;
+    }
+    if (fsync(directory_fd) != 0) {
+        const int saved_errno = errno;
+        close(directory_fd);
+        std::cerr << "dinit-bootstrap: cannot sync /run/dinit after publishing "
+                  << name << ": " << std::strerror(saved_errno) << '\n';
+        return false;
+    }
+    close(directory_fd);
+    return true;
 }
+
+bool write_state(const environment_info &info)
+{
+    std::ostringstream contents;
+    contents << "kind=" << kind_name(info.kind) << '\n'
+             << "pid1=" << (info.pid1 ? "yes" : "no") << '\n'
+             << "nested-pid-namespace=" << (info.pid_namespace_depth_known ? (info.nested_pid_namespace ? "yes" : "no") : "unknown") << '\n'
+             << "container=" << (info.container_name.empty() ? "none" : info.container_name) << '\n'
+             << "virtualization=" << (info.virtualization.empty() ? "none" : info.virtualization) << '\n'
+             << "mountinfo=" << (info.mountinfo_available ? "available" : "unavailable") << '\n'
+             << "root-fs=" << (info.root_fs_type.empty() ? "unknown" : info.root_fs_type) << '\n'
+             << "procfs=" << (info.mountinfo_available ? (info.procfs == "proc" ? "yes" : "no") : "unknown") << '\n'
+             << "sysfs=" << (info.mountinfo_available ? (info.sysfs == "sysfs" ? "yes" : "no") : "unknown") << '\n'
+             << "devfs=" << (info.devfs.empty() ? (info.mountinfo_available ? "no" : "unknown") : info.devfs) << '\n'
+             << "cgroups=" << info.cgroups << '\n';
+    return write_runtime_state_file("environment", contents.str());
+}
+
 
 environment_kind load_environment_kind()
 {
-    std::ifstream input("/run/dinit/environment");
+    const int directory_fd = open_runtime_state_directory();
+    if (directory_fd < 0) return environment_kind::unknown;
+    const int fd = openat(directory_fd, "environment",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    close(directory_fd);
+    if (fd < 0) return environment_kind::unknown;
+
+    std::string contents;
+    char buffer[512];
+    while (true) {
+        const ssize_t count = read(fd, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            close(fd);
+            return environment_kind::unknown;
+        }
+        if (count == 0) break;
+        contents.append(buffer, static_cast<std::string::size_type>(count));
+    }
+    close(fd);
+
+    std::istringstream input(contents);
     std::string line;
     while (std::getline(input, line)) {
         if (line == "kind=bare-metal") return environment_kind::bare_metal;
@@ -344,6 +463,48 @@ int mount_failure(environment_kind kind, const char *filesystem,
 
 bool ensure_mountpoint_directory(const char *path)
 {
+    const std::string target(path);
+    if (target.empty() || target[0] != '/' || target == "/"
+            || target[target.size() - 1] == '/' || target.find("//") != std::string::npos) {
+        std::cerr << "dinit-bootstrap: invalid mountpoint path " << path << '\n';
+        return false;
+    }
+    std::string::size_type component_start = 1;
+    while (component_start < target.size()) {
+        const std::string::size_type component_end = target.find('/', component_start);
+        const std::string component = target.substr(component_start,
+                component_end == std::string::npos ? std::string::npos
+                                                    : component_end - component_start);
+        if (component == "." || component == "..") {
+            std::cerr << "dinit-bootstrap: invalid mountpoint path " << path << '\n';
+            return false;
+        }
+        if (component_end == std::string::npos) break;
+        component_start = component_end + 1;
+    }
+
+    const std::string::size_type last_slash = target.find_last_of('/');
+    std::string parent = last_slash == 0 ? "/" : target.substr(0, last_slash);
+    std::string current;
+    std::string::size_type pos = 1;
+    while (pos <= parent.size()) {
+        const std::string::size_type end = parent.find('/', pos);
+        const std::string component = parent.substr(pos,
+                end == std::string::npos ? std::string::npos : end - pos);
+        if (!component.empty()) {
+            current += "/" + component;
+            struct stat parent_stat;
+            if (lstat(current.c_str(), &parent_stat) != 0
+                    || !S_ISDIR(parent_stat.st_mode)) {
+                std::cerr << "dinit-bootstrap: mountpoint parent " << current
+                          << " is missing or is not a real directory\n";
+                return false;
+            }
+        }
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+
     struct stat st;
     if (lstat(path, &st) == 0) {
         if (S_ISDIR(st.st_mode)) return true;
@@ -381,6 +542,17 @@ int ensure_pseudo_filesystem(const char *name)
 
     const mount_info current = detect_mounts();
     const std::string mounted = is_proc ? current.procfs : current.sysfs;
+    const bool mount_ambiguous = is_proc ? current.proc_ambiguous : current.sys_ambiguous;
+    if (mount_ambiguous) {
+        std::cerr << "dinit-bootstrap: cannot determine visible mount at "
+                  << mountpoint << '\n';
+        return 1;
+    }
+    if (!is_proc && !current.available) {
+        std::cerr << "dinit-bootstrap: cannot inspect mount table before setting up "
+                  << mountpoint << '\n';
+        return 1;
+    }
     if (current.available && !mounted.empty()) {
         if (mounted == filesystem) {
             std::cout << "dinit-bootstrap: " << mountpoint
@@ -405,6 +577,13 @@ int ensure_pseudo_filesystem(const char *name)
 
         const int mount_error = errno;
         const mount_info refreshed = detect_mounts();
+        const bool refreshed_ambiguous =
+                is_proc ? refreshed.proc_ambiguous : refreshed.sys_ambiguous;
+        if (refreshed_ambiguous) {
+            std::cerr << "dinit-bootstrap: cannot determine visible mount at "
+                      << mountpoint << '\n';
+            return 1;
+        }
         const std::string refreshed_mount = is_proc ? refreshed.procfs : refreshed.sysfs;
         if (refreshed.available && refreshed_mount == filesystem) {
             std::cout << "dinit-bootstrap: " << mountpoint
@@ -421,24 +600,17 @@ int ensure_pseudo_filesystem(const char *name)
 }
 
 
-std::string mounted_filesystem(const char *mountpoint)
+dinit_bootstrap::mount_result mounted_filesystem(const char *mountpoint)
 {
-    FILE *mounts = setmntent("/proc/self/mounts", "r");
-    if (mounts == nullptr) return std::string();
-    std::string filesystem;
-    struct mntent *entry;
-    while ((entry = getmntent(mounts)) != nullptr) {
-        if (std::strcmp(entry->mnt_dir, mountpoint) == 0) {
-            filesystem = entry->mnt_type;
-            break;
-        }
-    }
-    endmntent(mounts);
-    return filesystem;
+    dinit_bootstrap::mount_table table;
+    if (!dinit_bootstrap::read_mountinfo("/proc/self/mountinfo", table))
+        return dinit_bootstrap::mount_result(dinit_bootstrap::mount_state::ambiguous);
+    return dinit_bootstrap::find_visible_mount(table, mountpoint);
 }
 
 int ensure_device_filesystem(const char *mountpoint, const char *filesystem,
-        unsigned long flags, const char *options, bool accept_existing_any)
+        unsigned long flags, const char *options, bool accept_existing_any,
+        bool container_may_skip)
 {
     if (getppid() != 1) {
         std::cerr << "dinit-bootstrap: refusing device filesystem setup: "
@@ -447,15 +619,21 @@ int ensure_device_filesystem(const char *mountpoint, const char *filesystem,
     }
     if (!ensure_mountpoint_directory(mountpoint)) return 1;
 
-    const std::string current = mounted_filesystem(mountpoint);
-    if (!current.empty()) {
-        if (current == filesystem || accept_existing_any) {
+    dinit_bootstrap::mount_result current = mounted_filesystem(mountpoint);
+    if (current.state == dinit_bootstrap::mount_state::ambiguous) {
+        std::cerr << "dinit-bootstrap: cannot determine visible mount at "
+                  << mountpoint << "; refusing to mount over an unknown state\n";
+        return 1;
+    }
+    if (current.state == dinit_bootstrap::mount_state::mounted) {
+        const std::string &type = current.entry.filesystem;
+        if (type == filesystem || accept_existing_any) {
             std::cout << "dinit-bootstrap: " << mountpoint
-                      << " already mounted as " << current << '\n';
+                      << " already mounted as " << type << '\n';
             return 0;
         }
         std::cerr << "dinit-bootstrap: " << mountpoint << " is mounted as "
-                  << current << ", expected " << filesystem << '\n';
+                  << type << ", expected " << filesystem << '\n';
         return 1;
     }
 
@@ -466,19 +644,25 @@ int ensure_device_filesystem(const char *mountpoint, const char *filesystem,
         return 0;
     }
     const int mount_error = errno;
-    const std::string refreshed = mounted_filesystem(mountpoint);
-    if (!refreshed.empty()) {
-        if (refreshed == filesystem || accept_existing_any) {
+    current = mounted_filesystem(mountpoint);
+    if (current.state == dinit_bootstrap::mount_state::mounted) {
+        const std::string &type = current.entry.filesystem;
+        if (type == filesystem || accept_existing_any) {
             std::cout << "dinit-bootstrap: " << mountpoint
-                      << " became available as " << refreshed << '\n';
+                      << " became available as " << type << '\n';
             return 0;
         }
         std::cerr << "dinit-bootstrap: " << mountpoint
-                  << " became occupied by " << refreshed << '\n';
+                  << " became occupied by " << type << '\n';
+        return 1;
+    }
+    if (current.state == dinit_bootstrap::mount_state::ambiguous) {
+        std::cerr << "dinit-bootstrap: mount failed and the resulting mount state at "
+                  << mountpoint << " cannot be determined\n";
         return 1;
     }
     return mount_failure(kind, filesystem, std::strerror(mount_error),
-            kind == environment_kind::container);
+            container_may_skip);
 }
 
 int ensure_dev()
@@ -486,19 +670,63 @@ int ensure_dev()
     // A runtime-provided bind mount or devtmpfs is already authoritative.
     // Never cover an existing /dev mount from inside a container.
     return ensure_device_filesystem("/dev", "devtmpfs",
-            MS_NOSUID, "mode=0755", true);
+            MS_NOSUID, "mode=0755", true, true);
 }
 
 int ensure_devpts()
 {
-    return ensure_device_filesystem("/dev/pts", "devpts",
-            MS_NOSUID | MS_NOEXEC, "mode=0620,ptmxmode=0666", true);
+    if (ensure_device_filesystem("/dev/pts", "devpts",
+            MS_NOSUID | MS_NOEXEC, "mode=0620,ptmxmode=0666", false, false) != 0)
+        return 1;
+
+    // Verify the complete /dev/ptmx -> devpts path instead of requiring a
+    // particular symlink or device-node layout.
+    int master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (master < 0) {
+        std::cerr << "dinit-bootstrap: cannot open /dev/ptmx: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
+    if (grantpt(master) != 0) {
+        const int error = errno;
+        close(master);
+        std::cerr << "dinit-bootstrap: grantpt failed: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    if (unlockpt(master) != 0) {
+        const int error = errno;
+        close(master);
+        std::cerr << "dinit-bootstrap: unlockpt failed: "
+                  << std::strerror(error) << '\n';
+        return 1;
+    }
+    char slave_path[4096];
+    const int name_error = ptsname_r(master, slave_path, sizeof(slave_path));
+    if (name_error != 0) {
+        close(master);
+        std::cerr << "dinit-bootstrap: ptsname_r failed: "
+                  << std::strerror(name_error) << '\n';
+        return 1;
+    }
+    const int slave = open(slave_path, O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (slave < 0) {
+        const int error = errno;
+        close(master);
+        std::cerr << "dinit-bootstrap: cannot open allocated PTY slave "
+                  << slave_path << ": " << std::strerror(error) << '\n';
+        return 1;
+    }
+    close(slave);
+    close(master);
+    std::cout << "dinit-bootstrap: PTY allocation test passed\n";
+    return 0;
 }
 
 int ensure_shm()
 {
     return ensure_device_filesystem("/dev/shm", "tmpfs",
-            MS_NOSUID | MS_NODEV, "mode=1777", true);
+            MS_NOSUID | MS_NODEV, "mode=1777", false, true);
 }
 
 std::string find_executable(const std::string &name)
@@ -712,61 +940,7 @@ bool clear_root_fsck_status()
 
 bool write_root_fsck_status(const std::string &contents)
 {
-    if (mkdir("/run/dinit", 0755) != 0 && errno != EEXIST) {
-        std::cerr << "dinit-bootstrap: cannot create /run/dinit: "
-                  << std::strerror(errno) << '\n';
-        return false;
-    }
-    struct stat directory_stat;
-    if (lstat("/run/dinit", &directory_stat) != 0 || !S_ISDIR(directory_stat.st_mode)) {
-        std::cerr << "dinit-bootstrap: /run/dinit is not a real directory\n";
-        return false;
-    }
-
-    std::ostringstream temporary_name;
-    temporary_name << "/run/dinit/root-fsck.status.tmp." << getpid();
-    const std::string temporary = temporary_name.str();
-    const int fd = open(temporary.c_str(),
-            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) {
-        std::cerr << "dinit-bootstrap: cannot create temporary root fsck status: "
-                  << std::strerror(errno) << '\n';
-        return false;
-    }
-
-    bool write_ok = true;
-    std::string::size_type offset = 0;
-    while (offset < contents.size()) {
-        const ssize_t written = write(fd, contents.data() + offset,
-                contents.size() - offset);
-        if (written < 0 && errno == EINTR) continue;
-        if (written <= 0) {
-            if (written == 0) errno = EIO;
-            write_ok = false;
-            break;
-        }
-        offset += static_cast<std::string::size_type>(written);
-    }
-    const int write_error = write_ok ? 0 : errno;
-    if (close(fd) != 0 && write_ok) {
-        write_ok = false;
-    }
-    if (!write_ok) {
-        const int saved_errno = write_error != 0 ? write_error : errno;
-        unlink(temporary.c_str());
-        std::cerr << "dinit-bootstrap: failed writing root fsck status: "
-                  << std::strerror(saved_errno) << '\n';
-        return false;
-    }
-
-    if (rename(temporary.c_str(), "/run/dinit/root-fsck.status") != 0) {
-        const int saved_errno = errno;
-        unlink(temporary.c_str());
-        std::cerr << "dinit-bootstrap: cannot publish root fsck status: "
-                  << std::strerror(saved_errno) << '\n';
-        return false;
-    }
-    return true;
+    return write_runtime_state_file("root-fsck.status", contents);
 }
 
 struct fsck_options {

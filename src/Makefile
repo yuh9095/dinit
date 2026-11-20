@@ -25,11 +25,17 @@ CPPFLAGS_FOR_BUILD ?=
 CXXFLAGS_FOR_BUILD ?= -O2
 LDFLAGS_FOR_BUILD ?=
 
-.PHONY: bootstrap bootstrap-generated
+.PHONY: bootstrap bootstrap-generated check-bootstrap
 bootstrap: dinit-bootstrap bootstrap-generated
 
-dinit-bootstrap: bootstrap/runtime.cc
-	$(CXX) $(ALL_CXXFLAGS) -std=c++11 -o $@ $< $(ALL_LDFLAGS)
+dinit-bootstrap: bootstrap/runtime.cc bootstrap/mountinfo.cc bootstrap/mountinfo.h
+	$(CXX) $(ALL_CXXFLAGS) -std=c++11 -Ibootstrap -o $@ bootstrap/runtime.cc bootstrap/mountinfo.cc $(ALL_LDFLAGS)
+
+bootstrap/mountinfo-tests: bootstrap/mountinfo-tests.cc bootstrap/mountinfo.cc bootstrap/mountinfo.h
+	$(CXX) $(ALL_CXXFLAGS) -std=c++11 -Ibootstrap -o $@ bootstrap/mountinfo-tests.cc bootstrap/mountinfo.cc $(ALL_LDFLAGS)
+
+check-bootstrap: bootstrap/mountinfo-tests
+	./bootstrap/mountinfo-tests
 
 dinit-bootstrap-gen: bootstrap/generate.cc
 	$(CXX_FOR_BUILD) $(CPPFLAGS_FOR_BUILD) $(CXXFLAGS_FOR_BUILD) -std=c++11 -o $@ $< $(LDFLAGS_FOR_BUILD)
@@ -101,7 +107,7 @@ endif
 
 clean:
 	rm -f *.o *.d
-	rm -f dinit dinitctl dinit-check $(SHUTDOWN_PREFIX)shutdown dinit-monitor dinit-bootstrap dinit-bootstrap-gen
+	rm -f dinit dinitctl dinit-check $(SHUTDOWN_PREFIX)shutdown dinit-monitor dinit-bootstrap dinit-bootstrap-gen bootstrap/mountinfo-tests
 	rm -rf bootstrap-generated
 	$(MAKE) -C tests clean
 	$(MAKE) -C igr-tests clean
