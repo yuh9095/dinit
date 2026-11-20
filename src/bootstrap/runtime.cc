@@ -908,7 +908,7 @@ int run_root_rw()
     }
     endmntent(mounts);
     if (!root_found) {
-        std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing remount\\n";
+        std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing remount\n";
         return 1;
     }
     if (root_is_rw) {
