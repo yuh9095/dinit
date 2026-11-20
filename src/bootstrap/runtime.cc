@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -692,28 +693,128 @@ fsck_options read_fsck_options()
     std::istringstream cmdline(read_file("/proc/cmdline"));
     std::string item;
     while (cmdline >> item) {
-        if (item == "fastboot" || item == "fsck.mode=skip") options.skip = true;
-        else if (item == "forcefsck" || item == "fsck.mode=force") options.force = true;
-        else if (item == "fsckfix" || item == "fsck.repair=yes") options.repair = "-y";
-        else if (item == "fsck.repair=no") options.repair = "-n";
+        if (item == "fastboot") { options.skip = true; options.force = false; }
+        else if (item == "forcefsck") { options.skip = false; options.force = true; }
+        else if (item.compare(0, 10, "fsck.mode=") == 0) {
+            const std::string mode = item.substr(10);
+            if (mode == "auto") { options.skip = false; options.force = false; }
+            else if (mode == "force") { options.skip = false; options.force = true; }
+            else if (mode == "skip") { options.skip = true; options.force = false; }
+        }
+        else if (item == "fsckfix") options.repair = "-y";
+        else if (item.compare(0, 12, "fsck.repair=") == 0) {
+            const std::string repair = item.substr(12);
+            if (repair == "yes" || repair == "true") options.repair = "-y";
+            else if (repair == "no" || repair == "false") options.repair = "-n";
+            else if (repair == "preen") options.repair = "-a";
+        }
     }
     return options;
 }
 
+bool root_fsck_requested()
+{
+    FILE *fstab = setmntent("/etc/fstab", "r");
+    if (fstab == nullptr) return false;
+    bool requested = false;
+    struct mntent *entry;
+    while ((entry = getmntent(fstab)) != nullptr) {
+        if (std::strcmp(entry->mnt_dir, "/") == 0 && entry->mnt_passno != 0) {
+            requested = true;
+            break;
+        }
+    }
+    endmntent(fstab);
+    return requested;
+}
+
 int run_root_fsck()
 {
-    // Dinit is started after the kernel has mounted the root filesystem.
-    // Running a repairing fsck against that mounted block device is unsafe.
-    // Root filesystem checks belong in the initramfs, before the real root
-    // filesystem is mounted and handed over to PID 1.
     if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
+        std::cout << "dinit-bootstrap: root fsck is skipped inside a container\\n";
+        return 0;
     }
-    else {
-        std::cout << "dinit-bootstrap: root filesystem is already mounted; "
-                     "root fsck must be performed by the initramfs\n";
+
+    const fsck_options options = read_fsck_options();
+    if (options.skip) {
+        std::cout << "dinit-bootstrap: root fsck disabled by kernel command line\\n";
+        return 0;
     }
-    return 0;
+    if (!root_fsck_requested()) {
+        std::cout << "dinit-bootstrap: root fsck is not requested by /etc/fstab\\n";
+        return 0;
+    }
+
+    struct stat root_stat;
+    if (stat("/", &root_stat) != 0) {
+        std::cerr << "dinit-bootstrap: cannot inspect root filesystem: "
+                  << std::strerror(errno) << '\\n';
+        return 1;
+    }
+
+    // Like systemd, only consider a read-only, block-device-backed root.
+    // Virtual roots (tmpfs, overlayfs, containers, etc.) are not fsck targets.
+    if (major(root_stat.st_dev) == 0) {
+        std::cout << "dinit-bootstrap: root filesystem is virtual; skipping fsck\\n";
+        return 0;
+    }
+
+    struct timespec times[2];
+    times[0] = root_stat.st_atim;
+    times[1] = root_stat.st_mtim;
+    if (utimensat(AT_FDCWD, "/", times, 0) == 0) {
+        std::cout << "dinit-bootstrap: root filesystem is already read-write; skipping fsck\\n";
+        return 0;
+    }
+
+    FILE *mounts = setmntent("/proc/self/mounts", "r");
+    if (mounts == nullptr) {
+        std::cerr << "dinit-bootstrap: cannot inspect root mount source\\n";
+        return 1;
+    }
+    std::string root_source;
+    std::string root_type;
+    struct mntent *mount_entry;
+    while ((mount_entry = getmntent(mounts)) != nullptr) {
+        if (std::strcmp(mount_entry->mnt_dir, "/") == 0) {
+            root_source = mount_entry->mnt_fsname;
+            root_type = mount_entry->mnt_type;
+            break;
+        }
+    }
+    endmntent(mounts);
+
+    if (root_source.empty() || root_type.empty()) {
+        std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing fsck\\n";
+        return 1;
+    }
+
+    struct stat device_stat;
+    if (stat(root_source.c_str(), &device_stat) != 0 ||
+            !S_ISBLK(device_stat.st_mode) || device_stat.st_rdev != root_stat.st_dev) {
+        std::cout << "dinit-bootstrap: root source is not the matching block device; skipping fsck\\n";
+        return 0;
+    }
+
+    if (!executable_in_path("fsck") ||
+            !executable_in_path("fsck." + root_type)) {
+        std::cout << "dinit-bootstrap: no fsck helper for root filesystem type "
+                  << root_type << "; skipping\\n";
+        return 0;
+    }
+
+    std::vector<std::string> args;
+    args.push_back("fsck");
+    args.push_back("-t");
+    args.push_back(root_type);
+    args.push_back(options.repair);
+    if (options.force) args.push_back("-f");
+    args.push_back(root_source);
+
+    const int result = execute_program(args, false);
+    if (result == 0 || result == 1) return 0;
+    std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")\\n";
+    return 1;
 }
 
 int run_local_fsck()
