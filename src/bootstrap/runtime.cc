@@ -731,31 +731,31 @@ bool root_fsck_requested()
 int run_root_fsck()
 {
     if (load_environment_kind() == environment_kind::container) {
-        std::cout << "dinit-bootstrap: root fsck is skipped inside a container\\n";
+        std::cout << "dinit-bootstrap: root fsck is skipped inside a container\n";
         return 0;
     }
 
     const fsck_options options = read_fsck_options();
     if (options.skip) {
-        std::cout << "dinit-bootstrap: root fsck disabled by kernel command line\\n";
+        std::cout << "dinit-bootstrap: root fsck disabled by kernel command line\n";
         return 0;
     }
     if (!root_fsck_requested()) {
-        std::cout << "dinit-bootstrap: root fsck is not requested by /etc/fstab\\n";
+        std::cout << "dinit-bootstrap: root fsck is not requested by /etc/fstab\n";
         return 0;
     }
 
     struct stat root_stat;
     if (stat("/", &root_stat) != 0) {
         std::cerr << "dinit-bootstrap: cannot inspect root filesystem: "
-                  << std::strerror(errno) << '\\n';
+                  << std::strerror(errno) << '\n';
         return 1;
     }
 
     // Like systemd, only consider a read-only, block-device-backed root.
     // Virtual roots (tmpfs, overlayfs, containers, etc.) are not fsck targets.
     if (major(root_stat.st_dev) == 0) {
-        std::cout << "dinit-bootstrap: root filesystem is virtual; skipping fsck\\n";
+        std::cout << "dinit-bootstrap: root filesystem is virtual; skipping fsck\n";
         return 0;
     }
 
@@ -763,13 +763,13 @@ int run_root_fsck()
     times[0] = root_stat.st_atim;
     times[1] = root_stat.st_mtim;
     if (utimensat(AT_FDCWD, "/", times, 0) == 0) {
-        std::cout << "dinit-bootstrap: root filesystem is already read-write; skipping fsck\\n";
+        std::cout << "dinit-bootstrap: root filesystem is already read-write; skipping fsck\n";
         return 0;
     }
 
     FILE *mounts = setmntent("/proc/self/mounts", "r");
     if (mounts == nullptr) {
-        std::cerr << "dinit-bootstrap: cannot inspect root mount source\\n";
+        std::cerr << "dinit-bootstrap: cannot inspect root mount source\n";
         return 1;
     }
     std::string root_source;
@@ -785,21 +785,21 @@ int run_root_fsck()
     endmntent(mounts);
 
     if (root_source.empty() || root_type.empty()) {
-        std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing fsck\\n";
+        std::cerr << "dinit-bootstrap: root mount entry is unavailable; refusing fsck\n";
         return 1;
     }
 
     struct stat device_stat;
     if (stat(root_source.c_str(), &device_stat) != 0 ||
             !S_ISBLK(device_stat.st_mode) || device_stat.st_rdev != root_stat.st_dev) {
-        std::cout << "dinit-bootstrap: root source is not the matching block device; skipping fsck\\n";
+        std::cout << "dinit-bootstrap: root source is not the matching block device; skipping fsck\n";
         return 0;
     }
 
     if (!executable_in_path("fsck") ||
             !executable_in_path("fsck." + root_type)) {
         std::cout << "dinit-bootstrap: no fsck helper for root filesystem type "
-                  << root_type << "; skipping\\n";
+                  << root_type << "; skipping\n";
         return 0;
     }
 
@@ -813,7 +813,7 @@ int run_root_fsck()
 
     const int result = execute_program(args, false);
     if (result == 0 || result == 1) return 0;
-    std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")\\n";
+    std::cerr << "dinit-bootstrap: root fsck failed (status " << result << ")\n";
     return 1;
 }
 
